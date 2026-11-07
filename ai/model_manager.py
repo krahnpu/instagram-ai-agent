@@ -79,8 +79,8 @@ class ModelManager:
         payload = {
             "model": model_name.strip(),
             "messages": [{"role": "user", "content": "Reply with OK"}],
-            "max_tokens": 16,
-            "temperature": 0.1,
+            "max_tokens": 128,
+            "temperature": 0.7,
         }
 
         try:
@@ -101,7 +101,7 @@ class ModelManager:
                         "ok": False,
                         "error": "فرمت پاسخ سرویس با استاندارد OpenAI Chat Completions سازگار نیست.",
                     }
-                sample_reply = choices[0]["message"].get("content", "").strip()
+                sample_reply = (choices[0]["message"].get("content") or "").strip()
                 return {
                     "ok": True,
                     "sample_reply": sample_reply or "OK",
