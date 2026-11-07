@@ -401,12 +401,23 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": "send_message_via_user_account",
-                    "description": "Send a message FROM the connected Telegram user account (userbot, the owner's own account) TO the owner. Use this ONLY when the owner explicitly asks for a message via the user account / userbot, not the bot. If the user account is not connected, report that instead of sending via the bot.",
+                    "description": "Send a message FROM the connected Telegram user account (userbot, the owner's own account) TO the owner as a real DM. ALWAYS pass the owner's @username (e.g. Dev_kral) when you know it — without it the message may only reach Saved Messages. If the user account is not connected, report that instead of sending via the bot. The result tells you exactly where the message went (sent_via); report that destination honestly.",
                     "parameters": {
                         "type": "object",
-                        "properties": {"message": {"type": "string", "description": "Message text to send from the user account"}},
+                        "properties": {
+                            "message": {"type": "string", "description": "Message text to send from the user account"},
+                            "username": {"type": "string", "description": "Owner's Telegram @username without @, e.g. Dev_kral. Pass it whenever known."},
+                        },
                         "required": ["message"],
                     },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_telegram_user_account_status",
+                    "description": "Report which Telegram account the userbot session is actually logged into (username, user id, phone) and whether it is connected. Use this whenever the owner asks which account is connected, or before claiming anything about the user account connection — never guess the account from chat history.",
+                    "parameters": {"type": "object", "properties": {}},
                 },
             },
             {
@@ -486,7 +497,11 @@ class ToolRegistry:
         if name == "list_scheduled_tasks" and self.scheduler:
             return {"status": "ok", "tasks": await self.scheduler.list_dynamic_tasks()}
         if name == "send_message_via_user_account" and self.user_connector:
-            return await self.user_connector.send_message_to_owner(str(args.get("message", "")))
+            return await self.user_connector.send_message_to_owner(
+                str(args.get("message", "")), username=args.get("username")
+            )
+        if name == "get_telegram_user_account_status" and self.user_connector:
+            return await self.user_connector.get_account_status()
         if name == "create_scheduled_task" and self.scheduler:
             # Owner-only tool: owner's own tasks are auto-approved and mounted
             # immediately instead of waiting for an inline approval tap.

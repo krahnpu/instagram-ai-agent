@@ -48,6 +48,7 @@ class PermissionManager:
         "resume_scheduled_task",
         "list_scheduled_tasks",
         "send_message_via_user_account",
+        "get_telegram_user_account_status",
         "create_one_off_reminder",
         "start_telegram_login",
         "submit_telegram_code",

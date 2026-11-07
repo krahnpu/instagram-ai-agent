@@ -188,52 +188,93 @@ class TelegramUserAccountConnector:
         except Exception as exc:
             return {"status": "error", "error": f"خطا در بررسی رمز دومرحله‌ای: {exc}"}
 
+    async def get_account_status(self) -> Dict[str, Any]:
+        """Who is this Telethon session actually logged into? (Truthful status
+        for the owner — no guessing from chat history.)"""
+        if not self.client or not self.is_connected:
+            return {"status": "not_connected", "error": "حساب کاربری تلگرام (یوزربات) متصل نیست."}
+        try:
+            me = await self.client.get_me()
+            return {
+                "status": "ok",
+                "user_id": getattr(me, "id", None),
+                "username": getattr(me, "username", "") or "",
+                "phone": getattr(me, "phone", "") or "",
+            }
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
     async def send_message_to_owner(self, text: str, username: Optional[str] = None) -> Dict[str, Any]:
         """
         Send a message FROM the connected Telegram user account (userbot) TO
-        the owner. Telethon cannot send to a bare numeric user id that is not
-        in the session's entity cache ("PeerUser(...) not found") — so resolve
-        the recipient properly instead of passing the raw id:
+        the owner as a real DM — NOT to Saved Messages.
+
+        Telethon cannot send to a bare numeric user id that is not in the
+        session's entity cache ("PeerUser(...) not found"), so resolve the
+        recipient properly:
         1. by @username (API username lookup, works even if never cached),
-        2. 'me' (the account's own Saved Messages — always resolvable),
+        2. from the account's contacts by numeric id,
         3. the raw numeric id (only works if already cached).
-        Also reports which account the session is actually logged into, so an
-        account mismatch (session on another account) is visible instead of
-        a confusing "not found".
+        'me' (Saved Messages) is used ONLY as a last resort for a generic
+        connectivity test when no username was given — never silently when
+        the user asked for a DM to their account, because a message to
+        yourself always lands in Saved Messages anyway (Telegram has no
+        self-DM chat), so falling back to it would lie about the destination.
         """
         if not self.client or not self.is_connected:
             return {"status": "not_connected", "error": "حساب کاربری تلگرام (یوزربات) متصل نیست. ابتدا لاگین کنید."}
-        try:
-            me = await self.client.get_me()
-            connected_as = f"@{getattr(me, 'username', '')}" if getattr(me, "username", "") else str(getattr(me, "id", ""))
-        except Exception:
-            connected_as = "نامشخص"
-        candidates: List[Any] = []
-        if username:
-            candidates.append(f"@{username.lstrip('@')}")
-        candidates.append("me")
-        candidates.append(int(settings.TELEGRAM_OWNER_ID))
+        status = await self.get_account_status()
+        connected_as = f"@{status.get('username')}" if status.get("username") else str(status.get("user_id", "نامشخص"))
         errors: List[str] = []
-        for target in candidates:
+
+        if username:
             try:
-                await self.client.send_message(target, text)
-                return {
-                    "status": "ok",
-                    "sent_via": str(target),
-                    "connected_as": connected_as,
-                    "message": "پیام از طریق اکانت تلگرام متصل (یوزربات) ارسال شد.",
-                }
+                await self.client.send_message(f"@{username.lstrip('@')}", text)
+                return {"status": "ok", "sent_via": f"@{username.lstrip('@')}", "connected_as": connected_as,
+                        "message": "پیام از طریق اکانت تلگرام متصل (یوزربات) ارسال شد."}
             except Exception as exc:
-                errors.append(f"{target}: {exc}")
+                errors.append(f"@{username}: {exc}")
+
+        # Resolve the owner id from contacts (works without a username).
+        try:
+            contacts = await self.client.get_contacts()
+            owner_id = int(settings.TELEGRAM_OWNER_ID)
+            for contact in contacts or []:
+                if getattr(contact, "id", None) == owner_id:
+                    await self.client.send_message(contact, text)
+                    return {"status": "ok", "sent_via": "contacts", "connected_as": connected_as,
+                            "message": "پیام از طریق اکانت تلگرام متصل (یوزربات) ارسال شد."}
+        except Exception as exc:
+            errors.append(f"contacts: {exc}")
+
+        try:
+            await self.client.send_message(int(settings.TELEGRAM_OWNER_ID), text)
+            return {"status": "ok", "sent_via": "id", "connected_as": connected_as,
+                    "message": "پیام از طریق اکانت تلگرام متصل (یوزربات) ارسال شد."}
+        except Exception as exc:
+            errors.append(f"id: {exc}")
+
+        if not username:
+            # Generic connectivity test only: Saved Messages is acceptable here,
+            # and the result honestly says where it went.
+            try:
+                await self.client.send_message("me", text)
+                return {"status": "ok", "sent_via": "me (Saved Messages)", "connected_as": connected_as,
+                        "message": "پیام به «پیام‌های ذخیره‌شده» (Saved Messages) همان اکانت فرستاده شد."}
+            except Exception as exc:
+                errors.append(f"me: {exc}")
+
         logger.error(f"Failed to send message via user account: {errors}")
+        note = ""
+        if status.get("username") and username and status["username"].lower() == username.lstrip("@").lower():
+            note = " توجه: سشن به همان اکانت شما وصل است و پیام به خودت در تلگرام همیشه در Saved Messages می‌افتد؛ چت دایرکت جداگانه‌ای با خودت وجود ندارد."
         return {
             "status": "error",
             "connected_as": connected_as,
             "error": (
                 "تلگرام نتوانست گیرنده را پیدا کند (PeerUser not found). "
-                f"سشن به حساب {connected_as} متصل است. "
-                "اگر این حساب شما نیست، سشن به اکانت اشتباه متصل شده و باید دوباره لاگین کنید. "
-                f"جزئیات: {'; '.join(errors)[:200]}"
+                f"سشن به حساب {connected_as} متصل است." + note +
+                f" جزئیات: {'; '.join(errors)[:200]}"
             ),
         }
 

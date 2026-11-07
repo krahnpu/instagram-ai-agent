@@ -825,10 +825,17 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
                         username=owner_username,
                     )
                     if res.get("status") == "ok":
-                        await message.answer(
-                            "✅ پیام آزمایشی از طریق <b>اکانت تلگرام متصل (یوزربات)</b> برای شما ارسال شد. "
-                            "اگر آن را دریافت کردید، یعنی اتصال یوزربات برقرار است."
-                        )
+                        dest = res.get("sent_via", "")
+                        if dest.startswith("me"):
+                            await message.answer(
+                                "⚠️ پیام فقط به «پیام‌های ذخیره‌شده» (Saved Messages) همان اکانت رسید، نه به چت شما — "
+                                "چون یوزرنیم شما برای ارسال مستقیم پیدا نشد."
+                            )
+                        else:
+                            await message.answer(
+                                "✅ پیام آزمایشی از طریق <b>اکانت تلگرام متصل (یوزربات)</b> به چت شما ارسال شد. "
+                                "اگر آن را دریافت کردید، یعنی اتصال یوزربات برقرار است."
+                            )
                     else:
                         await message.answer(f"❌ خطا در ارسال پیام از طریق یوزربات: {res.get('error')}")
                 else:
@@ -836,6 +843,18 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
                         "⚠️ حساب کاربری تلگرام (یوزربات) هنوز متصل نیست. "
                         "اول با ارسال شماره تلفن لاگین کنید، بعد این تست را انجام می‌دهم."
                     )
+                return
+
+            # (a-4) Which Telegram account is the userbot session logged into?
+            if any(k in norm_text for k in ("وضعیت اتصال تلگرام", "اکانت یوزربات", "یوزربات وصل", "به کدوم اکانت وصل")):
+                st = await manager.user_connector.get_account_status() if manager.user_connector else {"status": "not_connected"}
+                if st.get("status") == "ok":
+                    await message.answer(
+                        "📱 <b>وضعیت یوزربات:</b> متصل ✅\n"
+                        f"اکانت متصل: @{st.get('username') or '؟'} (آیدی: <code>{st.get('user_id')}</code>)"
+                    )
+                else:
+                    await message.answer(f"⚠️ یوزربات متصل نیست: {st.get('error', '')}")
                 return
 
             # (a0) A Telethon login is already in progress: a digits-only message
