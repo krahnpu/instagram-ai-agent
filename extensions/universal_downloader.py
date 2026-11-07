@@ -112,46 +112,90 @@ def _ytdlp_json(url: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _search_candidates(search_url: str, limit: int = 3) -> list[str]:
+    """Resolve a yt-dlp search URL (ytsearchN:/scsearchN:) to candidate page
+    URLs, without downloading. Returns [] when the search finds nothing.
+    The caller tries each candidate until one downloads — the first result
+    is often DRM-protected, geo-blocked or deleted (e.g. SoundCloud's top
+    Latin result for a Persian song)."""
+    try:
+        proc = _run_ytdlp(["--dump-json", "--flat-playlist", "--no-playlist",
+                           "--no-download", search_url], timeout=120)
+    except Exception:
+        return []
+    if not proc or proc.returncode != 0:
+        return []
+    out: list[str] = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        u = item.get("webpage_url") or item.get("url") or ""
+        if u and u not in out:
+            out.append(u)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _is_search_url(url: str) -> bool:
+    return url.startswith(("ytsearch", "scsearch", "ytsearch1:", "scsearch1:"))
+
+
+def _search_urls_for(url: str, kind: str) -> list[str]:
+    """Ordered search URLs to try for one audio download request.
+    SoundCloud first, YouTube second (user's choice)."""
+    if kind != "audio":
+        return [url]
+    if url.startswith("ytsearch1:"):
+        q = url[len("ytsearch1:"):]
+        return [f"scsearch1:{q}", url]
+    if url.startswith("scsearch1:"):
+        q = url[len("scsearch1:"):]
+        return [url, f"ytsearch1:{q}"]
+    return [url]
+
+
 async def _download_and_send(url: str, kind: str, out_dir: Path, note: str = "") -> Dict[str, Any]:
     """Download one URL with yt-dlp and send the file to the owner."""
     job_dir = out_dir / f"dl_{uuid.uuid4().hex[:10]}"
     job_dir.mkdir(parents=True, exist_ok=True)
     template = str(job_dir / "%(title).60s.%(ext)s")
     if kind == "audio":
-        args = ["-x", "--audio-format", "mp3", "--audio-quality", "0",
-                "--no-playlist", "-o", template, url]
+        base_args = ["-x", "--audio-format", "mp3", "--audio-quality", "0",
+                     "--no-playlist", "-o", template]
     else:
-        args = ["-f", "bv*[height<=720]+ba/b[height<=720]/b",
-                "--max-filesize", "45M", "--no-playlist", "-o", template, url]
-    # Song search order (user's choice): SoundCloud first, YouTube second.
-    # SoundCloud is fast and unblocked from datacenter IPs; YouTube is the
-    # fallback. Direct URLs are tried as-is.
-    candidates = [url]
-    if kind == "audio" and url.startswith("ytsearch1:"):
-        _q = url[len("ytsearch1:"):]
-        candidates = [f"scsearch1:{_q}", url]
-    elif kind == "audio" and url.startswith("scsearch1:"):
-        _q = url[len("scsearch1:"):]
-        candidates = [url, f"ytsearch1:{_q}"]
-    proc = None
+        base_args = ["-f", "bv*[height<=720]+ba/b[height<=720]/b",
+                     "--max-filesize", "45M", "--no-playlist", "-o", template]
+    # Search URLs resolve to several candidates; try each until one downloads.
     last_err = ""
-    for cand in candidates:
-        cand_args = list(args)
-        cand_args[-1] = cand
-        try:
-            proc = await asyncio.to_thread(_run_ytdlp, cand_args, 180)
-        except subprocess.TimeoutExpired:
-            last_err = "دانلود طول کشید و متوقف شد"
-            proc = None
+    proc = None
+    for search_url in _search_urls_for(url, kind):
+        cands = _search_candidates(search_url) if _is_search_url(search_url) else [search_url]
+        if not cands:
+            last_err = "جستجو نتیجه‌ای نداشت"
             continue
-        except Exception as exc:
-            last_err = f"خطا در اجرای دانلود: {exc}"
+        for cand in cands:
+            try:
+                proc = await asyncio.to_thread(_run_ytdlp, base_args + [cand], 120)
+            except subprocess.TimeoutExpired:
+                last_err = "دانلود طول کشید و متوقف شد"
+                proc = None
+                continue
+            except Exception as exc:
+                last_err = f"خطا در اجرای دانلود: {exc}"
+                proc = None
+                continue
+            if proc and proc.returncode == 0:
+                break
+            last_err = ((proc.stderr or proc.stdout or "")[-500:] if proc else "")
             proc = None
-            continue
         if proc and proc.returncode == 0:
             break
-        last_err = ((proc.stderr or proc.stdout or "")[-500:] if proc else "")
-        proc = None
     if not proc or proc.returncode != 0:
         return {"status": "error", "error": f"دانلود ناموفق بود: {last_err}"}
     files = [p for p in job_dir.iterdir() if p.is_file()]
@@ -262,6 +306,7 @@ async def identify_song(args: Dict[str, Any]) -> Dict[str, Any]:
 
 async def find_song_of_video(args: Dict[str, Any]) -> Dict[str, Any]:
     url = (args.get("url") or "").strip()
+    query_fa = (args.get("query_fa") or "").strip()
     send_full = bool(args.get("send_full_song", True))
     if not url:
         return {"status": "error", "error": "لینک ویدئو را نفرستادی؛ یک URL بده."}
@@ -296,15 +341,24 @@ async def find_song_of_video(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "ok", "found": True, "title": ident.get("title"),
                 "artist": ident.get("artist"), "url": ident.get("url"), "message": msg}
     query = f"{ident.get('artist', '')} - {ident.get('title', '')}".strip(" -")
-    dl = await _download_and_send(f"ytsearch1:{query}", "audio", out_dir,
-                                  note=f"{msg}\nآهنگ کامل:")
-    if dl.get("status") == "error":
-        return {"status": "ok", "found": True, "title": ident.get("title"),
-                "artist": ident.get("artist"), "url": ident.get("url"),
-                "message": f"{msg}\n(آهنگ کامل دانلود نشد: {dl.get('error')})"}
+    # Persian songs are often only findable with the Persian spelling
+    # (SoundCloud/YouTube titles are in Persian script), so try the Persian
+    # query first, then the Latin one. Each query tries SoundCloud then
+    # YouTube. Never fall back to the extracted clip — if the full song is
+    # not found, say so; the owner does not want the short clip.
+    queries = [q for q in (query_fa, query) if q]
+    last_err = ""
+    for q in queries:
+        dl = await _download_and_send(f"ytsearch1:{q}", "audio", out_dir,
+                                      note=f"{msg}\nآهنگ کامل:")
+        if dl.get("status") != "error":
+            return {"status": "ok", "found": True, "title": ident.get("title"),
+                    "artist": ident.get("artist"), "url": ident.get("url"),
+                    "message": f"{msg}\nآهنگ کامل هم فرستاده شد."}
+        last_err = dl.get("error", "")
     return {"status": "ok", "found": True, "title": ident.get("title"),
             "artist": ident.get("artist"), "url": ident.get("url"),
-            "message": f"{msg}\nآهنگ کامل هم فرستاده شد."}
+            "message": f"{msg}\n(آهنگ کامل دانلود نشد: {last_err})"}
 
 
 async def extract_audio(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -352,9 +406,9 @@ def register(registry):
         "download_media",
         {"type": "function", "function": {
             "name": "download_media",
-            "description": "Download audio or video from any URL yt-dlp supports (Instagram, YouTube, TikTok, X, SoundCloud and more) and send the file to the owner. Spotify track links fall back to the same track found on YouTube.",
+            "description": "Download audio or video from any URL yt-dlp supports (Instagram, YouTube, TikTok, X, SoundCloud and more) and send the file to the owner. Spotify track links fall back to the same track found on YouTube. Do not try shazam.com links — they return 403 from servers; search for the song by title instead. For a song title, pass the title as a search query: the tool tries SoundCloud first, then YouTube, and tries several search results until one downloads. If the Latin spelling fails, retry with the Persian spelling of the title.",
             "parameters": {"type": "object", "properties": {
-                "url": {"type": "string", "description": "The page or media URL to download."},
+                "url": {"type": "string", "description": "The page or media URL to download, or a search query for a song (the tool searches SoundCloud first, then YouTube)."},
                 "kind": {"type": "string", "description": "video, audio, or auto (default)."},
             }, "required": ["url"]},
         }},
@@ -375,7 +429,7 @@ def register(registry):
         "extract_audio",
         {"type": "function", "function": {
             "name": "extract_audio",
-            "description": "Extract the audio track of a LOCAL video file (already on the server) and send it to the owner as an mp3. Use this when the owner asks for the song/audio of a video they sent — no internet download needed.",
+            "description": "Extract the audio track of a LOCAL video file (already on the server) and send it to the owner as an mp3. ONLY use this when the owner explicitly asks for the audio of that video itself (for example 'صدای همین ویدیو را بفرست'). NEVER use it when the owner asked for the full song — in that case download the full song from the internet with download_media or find_song_of_video instead, and if the full song is not found say so instead of sending the extracted short clip.",
             "parameters": {"type": "object", "properties": {
                 "video_path": {"type": "string", "description": "Local file path of the video."},
             }, "required": ["video_path"]},
@@ -386,9 +440,10 @@ def register(registry):
         "find_song_of_video",
         {"type": "function", "function": {
             "name": "find_song_of_video",
-            "description": "Find the song used in a video URL: extracts the video audio, identifies the song with Shazam, and sends the full song to the owner.",
+            "description": "Find the song used in a video URL: extracts the video audio, identifies the song with Shazam, and downloads and sends the FULL song from the internet (SoundCloud first, then YouTube). If you also know the song title in Persian script, pass it as query_fa — Persian titles are often only found with the Persian spelling. Never send the extracted clip from the video as a substitute for the full song; if the full song cannot be found, say so in one sentence.",
             "parameters": {"type": "object", "properties": {
                 "url": {"type": "string", "description": "The video URL."},
+                "query_fa": {"type": "string", "description": "The song title and artist in Persian script, if you know it (for example 'گل بی گلدون گوگوش'). Tried first, before the Latin title."},
                 "send_full_song": {"type": "boolean", "description": "If true (default), download and send the full song too."},
             }, "required": ["url"]},
         }},
