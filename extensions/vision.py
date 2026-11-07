@@ -205,6 +205,10 @@ async def describe_image(args: Dict[str, Any]) -> Dict[str, Any]:
     if not base_url or not api_key:
         return {"status": "ok", "description": facts_text + " (مدل بینایی در دسترس نیست؛ تنظیمات هوش مصنوعی را بررسی کن.)",
                 "facts": facts, "message": facts_text}
+    # The agent's base_url already ends in /v1 (https://api.inceptionlabs.ai/v1),
+    # so the Decide endpoint is {base_url}/decisions — NOT {base_url}/v1/decisions
+    # (that double /v1/v1 returned HTTP 404).
+    decide_url = f"{base_url}/decisions" if base_url.endswith("/v1") else f"{base_url}/v1/decisions"
     payload = {
         "model": "mercury-decide",
         "state": [
@@ -216,7 +220,7 @@ async def describe_image(args: Dict[str, Any]) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=90) as client:
             resp = await client.post(
-                f"{base_url}/v1/decisions",
+                decide_url,
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json=payload,
             )
@@ -226,7 +230,7 @@ async def describe_image(args: Dict[str, Any]) -> Dict[str, Any]:
                 "facts": facts, "message": facts_text}
     if resp.status_code != 200:
         return {"status": "ok",
-                "description": facts_text + f" (مدل بینایی خطا داد: HTTP {resp.status_code})",
+                "description": facts_text + f" (مدل بینایی خطا داد: HTTP {resp.status_code} {resp.text[:150]})",
                 "facts": facts, "message": facts_text}
     try:
         answers = resp.json().get("answers", {}) or {}
