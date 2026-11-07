@@ -130,7 +130,17 @@ class SchedulerManager:
         lower = normalized.lower()
 
         # 1. Detect Task Type
-        if any(k in lower for k in ("دایرکت", "پیام", "direct", "dm", "inbox")):
+        # Telegram message checking comes FIRST: "پیام" alone used to map
+        # everything to Instagram auto_reply_directs, so Telegram-only tasks
+        # were created as Instagram tasks and halted on the missing IG session.
+        if (
+            any(k in lower for k in ("تلگرام", "telegram"))
+            and any(k in lower for k in ("پیام", "دایرکت", "جواب", "چک", "direct", "dm"))
+            and "کانال" not in lower
+        ):
+            task_type = "telegram_auto_reply"
+            title = "چک کردن پیام‌های تلگرام و پاسخ هوشمند"
+        elif any(k in lower for k in ("دایرکت", "پیام", "direct", "dm", "inbox")):
             task_type = "auto_reply_directs"
             title = "بررسی خودکار دایرکت‌ها و پاسخ هوشمند"
         elif any(k in lower for k in ("کامنت", "comment", "نظرات")):
@@ -155,10 +165,27 @@ class SchedulerManager:
         min_match = re.search(r"هر\s*(\d+)\s*دقیقه|every\s*(\d+)\s*min", lower)
         hour_match = re.search(r"هر\s*(\d+)\s*ساعت|every\s*(\d+)\s*hour", lower)
         daily_hour_match = re.search(r"هر\s*روز\s*ساعت\s*(\d+)", lower)
+        # Persian number words ("هر پنج ثانیه") — the digit regex misses them
+        # and the interval silently fell back to 300s, so the task looked
+        # active but never answered in time.
+        word_numbers = {
+            "یک": 1, "دو": 2, "سه": 3, "چهار": 4, "پنج": 5, "شش": 6,
+            "هفت": 7, "هشت": 8, "نه": 9, "ده": 10, "پانزده": 15,
+            "بیست": 20, "سی": 30, "شصت": 60,
+        }
+        word_sec_matched = False
+        if not sec_match:
+            word_sec = re.search(r"هر\s*(یک|دو|سه|چهار|پنج|شش|هفت|هشت|نه|ده|پانزده|بیست|سی|شصت)\s*ثانیه", lower)
+            if word_sec:
+                interval_seconds = max(5, word_numbers[word_sec.group(1)])
+                schedule_kind = "interval"
+                word_sec_matched = True
 
-        if sec_match:
+        if word_sec_matched:
+            pass  # interval already set from the Persian number word
+        elif sec_match:
             val = int(sec_match.group(1) or sec_match.group(2))
-            interval_seconds = max(15, val)
+            interval_seconds = max(5, val)
             schedule_kind = "interval"
         elif min_match:
             val = int(min_match.group(1) or min_match.group(2))
@@ -362,7 +389,7 @@ class SchedulerManager:
         kind = task["schedule_kind"]
 
         if kind in ("interval", "event_driven") and task["interval_seconds"] > 0:
-            trigger = IntervalTrigger(seconds=max(15, task["interval_seconds"]))
+            trigger = IntervalTrigger(seconds=max(5, task["interval_seconds"]))
         elif kind in ("cron", "daily_cron", "weekly_cron") and task["cron_expr"]:
             parts = task["cron_expr"].split()
             if len(parts) == 5:

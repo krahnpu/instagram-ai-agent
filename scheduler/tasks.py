@@ -132,6 +132,58 @@ class ScheduledTaskRunner:
                 )
                 return
 
+            if task_type == "telegram_auto_reply":
+                # Telegram-only task: checks the Telethon user account's DMs
+                # and replies. It NEVER touches Instagram and is never halted
+                # by the Instagram security guard — that guard paused every
+                # Telegram task before, because the parser mapped them to
+                # auto_reply_directs (Instagram) and the first run failed on
+                # the missing IG session.
+                connector = getattr(getattr(self.agent, "tool_registry", None), "user_connector", None)
+                if connector is None or not getattr(connector, "is_connected", False):
+                    await self._update_task_run(task_id, now_iso, "یوزربات تلگرام متصل نیست؛ دور بعد دوباره تلاش می‌شود")
+                    return
+                status = await connector.get_account_status()
+                own_id = status.get("user_id")
+                dialogs = await connector.list_telegram_dialogs(limit=20)
+                if dialogs.get("status") != "ok":
+                    await self._update_task_run(task_id, now_iso, f"خطا در خواندن گفت‌وگوها: {str(dialogs.get('error', ''))[:60]}")
+                    return
+                replied_count = 0
+                for d in dialogs.get("dialogs", []):
+                    if d.get("type") != "user" or not d.get("unread"):
+                        continue
+                    peer = d.get("username") or d.get("id")
+                    msgs = await connector.read_telegram_messages(peer=peer, limit=min(5, int(d["unread"])))
+                    if msgs.get("status") != "ok":
+                        continue
+                    for m in msgs.get("messages", []):
+                        if not m.get("text"):
+                            continue
+                        if own_id and m.get("sender_id") == own_id:
+                            continue
+                        event_key = f"tg:{d['id']}:{m['id']}"
+                        if await self._is_event_processed(event_key):
+                            continue
+                        prompt = (
+                            "یک نفر در تلگرام به حساب کاربری من این پیام را فرستاده است:\n"
+                            f"«{m.get('text', '')}»\n"
+                            "یک پاسخ کوتاه، محترمانه و دقیق به فارسی بنویس."
+                        )
+                        ai_res = await self.agent.ai_client.chat_completion(
+                            messages=[{"role": "user", "content": prompt}]
+                        )
+                        reply_text = ai_res.get("message", {}).get("content", "")
+                        if reply_text:
+                            send_res = await connector.send_telegram_message(peer=peer, text=reply_text)
+                            if send_res.get("status") == "ok":
+                                replied_count += 1
+                        await self._mark_event_processed(event_key, task_id)
+                await self._update_task_run(
+                    task_id, now_iso, f"موفق ({replied_count} پاسخ جدید ارسال شد)"
+                )
+                return
+
             if task_type == "scan_duplicates":
                 scan = await self.ig_content_manager.find_duplicate_posts(amount=20)
                 dup_count = len(scan.get("exact_duplicates", []))

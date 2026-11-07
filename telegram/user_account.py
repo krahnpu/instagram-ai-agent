@@ -300,7 +300,7 @@ class TelegramUserAccountConnector:
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
-    async def read_telegram_messages(self, peer: str, limit: int = 10) -> Dict[str, Any]:
+    async def read_telegram_messages(self, peer: Any, limit: int = 10) -> Dict[str, Any]:
         """Read recent messages from one Telegram chat via the userbot.
         peer can be a @username, a numeric id, or a phone number."""
         if not self.client or not self.is_connected:
@@ -319,6 +319,18 @@ class TelegramUserAccountConnector:
                     "text": m.text or "",
                 })
             return {"status": "ok", "peer": getattr(entity, "username", None) or str(peer), "messages": msgs}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+    async def send_telegram_message(self, peer: Any, text: str) -> Dict[str, Any]:
+        """Send a message FROM the userbot account to one Telegram chat
+        (used by the telegram_auto_reply background task)."""
+        if not self.client or not self.is_connected:
+            return {"status": "error", "error": "حساب کاربری تلگرام (یوزربات) متصل نیست."}
+        try:
+            entity = await self.client.get_entity(peer)
+            await self.client.send_message(entity, text)
+            return {"status": "ok"}
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
