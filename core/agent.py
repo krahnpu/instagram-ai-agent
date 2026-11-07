@@ -89,6 +89,12 @@ class AutonomousAgent:
                         "reply": "این موضوع را نمی‌توانم بررسی کنم، چون مدل به‌خاطر فیلتر محتوا جواب نمی‌دهد. سوالت را جور دیگری بپرس.",
                         "trace": execution_trace,
                     }
+                if ai_response["error"] == "tools_validation":
+                    return {
+                        "status": "ناموفق",
+                        "reply": "لیست ابزارها مشکل دارد؛ افزونه‌ای که آخر اضافه شد اسکیمای درستی ندارد. افزونه را با اسکیمای درست دوباره بفرست.",
+                        "trace": execution_trace,
+                    }
                 return {
                     "status": "ناموفق",
                     "reply": f"⚠️ خطا در ارتباط با سرویس هوش مصنوعی: {ai_response['error']}",
