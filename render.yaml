@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: instagram-ai-agent
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: mkdir -p /tmp/www && python main.py & exec python -m http.server $PORT --bind 0.0.0.0 --directory /tmp/www
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_OWNER_ID
+        sync: false
+      - key: AI_API_BASE_URL
+        value: https://api.inceptionlabs.ai/v1
+      - key: AI_API_KEY
+        sync: false
+      - key: AI_MODEL_NAME
+        value: mercury-3
+      - key: AUTO_PUBLISH_REQUIRE_APPROVAL
+        value: "true"
+      - key: IG_SESSION_PATH
+        value: /etc/secrets/session.json
