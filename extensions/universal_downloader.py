@@ -69,11 +69,26 @@ def _ytdlp_available() -> bool:
         return False
 
 
+def _ffmpeg_location() -> Optional[str]:
+    """Path of the static ffmpeg binary bundled with imageio-ffmpeg.
+    Render's free image has no ffmpeg/ffprobe on PATH, so yt-dlp audio
+    extraction (-x) and stream merging (bv+ba) fail with
+    'ffprobe and ffmpeg not found' unless yt-dlp is told where ffmpeg is."""
+    try:
+        import imageio_ffmpeg
+        p = imageio_ffmpeg.get_ffmpeg_exe()
+        return p if p and Path(p).exists() else None
+    except Exception:
+        return None
+
+
 def _run_ytdlp(args, timeout=300):
     base = _ytdlp_cmd_base()
     if not base:
         return None
-    return subprocess.run(base + args, capture_output=True, text=True, timeout=timeout)
+    ff = _ffmpeg_location()
+    full = base + (["--ffmpeg-location", ff] if ff else []) + args
+    return subprocess.run(full, capture_output=True, text=True, timeout=timeout)
 
 
 def _ytdlp_json(url: str) -> Optional[Dict[str, Any]]:
@@ -263,6 +278,42 @@ async def find_song_of_video(args: Dict[str, Any]) -> Dict[str, Any]:
             "message": f"{msg}\nآهنگ کامل هم فرستاده شد."}
 
 
+async def extract_audio(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract the audio track of a LOCAL video file and send it as mp3.
+    This is what the owner means by "خود آهنگ را بفرست" for a video they
+    already sent — no internet download involved."""
+    path_str = (args.get("video_path") or "").strip()
+    if not path_str or not Path(path_str).exists():
+        return {"status": "error", "error": "فایل ویدئو پیدا نشد؛ مسیر درست فایل را بده."}
+    try:
+        import imageio_ffmpeg
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return {"status": "error", "error": "ffmpeg در دسترس نیست؛ نمی‌توانم صدا را استخراج کنم."}
+    src = Path(path_str)
+    out = _media_dir() / f"{src.stem}.mp3"
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            [ffmpeg, "-y", "-i", str(src), "-vn", "-codec:a", "libmp3lame", "-q:a", "2", str(out)],
+            capture_output=True, timeout=300,
+        )
+    except Exception as exc:
+        return {"status": "error", "error": f"استخراج صدا ناموفق بود: {exc}"}
+    if proc.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+        err = (proc.stderr or b"")[-300:].decode("utf-8", "replace")
+        return {"status": "error", "error": f"استخراج صدا ناموفق بود: {err}"}
+    size_mb = out.stat().st_size / (1024 * 1024)
+    if out.stat().st_size > _MAX_SEND_BYTES:
+        return {"status": "error", "error": f"فایل صوتی خیلی بزرگ است ({size_mb:.1f} مگابایت)؛ تلگرام بیشتر از ۵۰ مگابایت نمی‌فرستد."}
+    if _REGISTRY is not None:
+        sent = await _REGISTRY._send_file_to_owner(file_path=str(out), caption=out.name)
+        if sent.get("status") == "error":
+            return {"status": "error", "error": f"صدا استخراج شد ولی ارسال نشد: {sent.get('error')}"}
+    return {"status": "ok", "message": f"صدای ویدئو استخراج و فرستاده شد: {out.name} ({size_mb:.1f} مگابایت)",
+            "file": out.name, "size_mb": round(size_mb, 1)}
+
+
 # ---------------------------------------------------------------- registration
 
 def register(registry):
@@ -290,6 +341,17 @@ def register(registry):
             }, "required": ["file_path"]},
         }},
         identify_song,
+    )
+    registry.register_extension_tool(
+        "extract_audio",
+        {"type": "function", "function": {
+            "name": "extract_audio",
+            "description": "Extract the audio track of a LOCAL video file (already on the server) and send it to the owner as an mp3. Use this when the owner asks for the song/audio of a video they sent — no internet download needed.",
+            "parameters": {"type": "object", "properties": {
+                "video_path": {"type": "string", "description": "Local file path of the video."},
+            }, "required": ["video_path"]},
+        }},
+        extract_audio,
     )
     registry.register_extension_tool(
         "find_song_of_video",
