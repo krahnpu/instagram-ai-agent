@@ -1,5 +1,8 @@
+from pathlib import Path
 from typing import Any, Dict, List
+from config import settings
 from core.permissions import Role, PermissionManager
+from utils.helpers import get_vps_resource_snapshot
 
 
 class ToolRegistry:
@@ -40,6 +43,51 @@ class ToolRegistry:
         self.scheduler = scheduler
         self.self_extender = self_extender
         self.permissions = PermissionManager()
+        # Aiogram Bot used to send files to the owner; wired in main.py after
+        # TelegramBotManager is created (tool registry is built first).
+        self.file_sender_bot: Any = None
+
+    def set_file_sender(self, bot: Any) -> None:
+        self.file_sender_bot = bot
+
+    async def _send_file_to_owner(
+        self,
+        filename: str = "",
+        content: str = "",
+        file_path: str = "",
+        caption: str = "",
+    ) -> Dict[str, Any]:
+        """Send a file to the owner as a Telegram document. Either builds the
+        file from text content (filename + content) or sends an existing
+        server file (file_path). The filename is sanitised to a bare name so
+        no path traversal is possible; content is capped at 5 MB."""
+        if self.file_sender_bot is None:
+            return {"status": "error", "error": "ارسال فایل در دسترس نیست."}
+        try:
+            if file_path:
+                path = Path(file_path)
+                if not path.exists() or not path.is_file():
+                    return {"status": "error", "error": f"فایل یافت نشد: {file_path}"}
+            else:
+                if "/" in filename or "\\" in filename or not filename.strip() or filename.strip() in {".", ".."}:
+                    return {"status": "error", "error": "نام فایل معتبر نیست. فقط نام فایل بدهید، بدون پوشه."}
+                safe_name = Path(filename).name
+                if len(content.encode("utf-8")) > 5 * 1024 * 1024:
+                    return {"status": "error", "error": "محتوای فایل بزرگ‌تر از ۵ مگابایت است."}
+                out_dir = Path(settings.TEMP_MEDIA_DIR)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                path = out_dir / safe_name
+                path.write_text(content, encoding="utf-8")
+            from aiogram.types import FSInputFile
+
+            await self.file_sender_bot.send_document(
+                settings.TELEGRAM_OWNER_ID,
+                FSInputFile(str(path)),
+                caption=caption or None,
+            )
+            return {"status": "ok", "filename": path.name, "message": "فایل برای شما ارسال شد."}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
 
     def get_openai_tool_schemas(self, role: Role) -> List[Dict[str, Any]]:
         all_tools: List[Dict[str, Any]] = [
@@ -424,6 +472,45 @@ class ToolRegistry:
             {
                 "type": "function",
                 "function": {
+                    "name": "create_and_send_file",
+                    "description": "Create a file from text content and send it to the owner as a real Telegram document attachment. Use this whenever the owner asks for a file (for example an HTML game, a script, a text file): build the complete content and send it as a file — never paste long code as a chat message instead. Filename only, no folders.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "filename": {"type": "string", "description": "File name only, e.g. snake.html"},
+                            "content": {"type": "string", "description": "Complete file content"},
+                            "caption": {"type": "string", "description": "Short caption for the file message"},
+                        },
+                        "required": ["filename", "content"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_file_to_owner",
+                    "description": "Send an existing file from the server to the owner as a Telegram document attachment.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string", "description": "Local path of the file on the server"},
+                            "caption": {"type": "string", "description": "Short caption for the file message"},
+                        },
+                        "required": ["file_path"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_server_resources",
+                    "description": "Report the live server resources this agent runs on: CPU percent, RAM used/total, free disk. Use this whenever the owner asks how much server resources, CPU, RAM or disk are available or used — never guess and never claim you cannot check it.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "propose_package_installation",
                     "description": "Propose installing a required Python package in the virtualenv, awaiting Owner confirmation.",
                     "parameters": {
@@ -505,6 +592,19 @@ class ToolRegistry:
             )
         if name == "get_telegram_user_account_status" and self.user_connector:
             return await self.user_connector.get_account_status()
+        if name == "get_server_resources":
+            return {"status": "ok", **get_vps_resource_snapshot()}
+        if name == "create_and_send_file":
+            return await self._send_file_to_owner(
+                filename=str(args.get("filename", "")),
+                content=str(args.get("content", "")),
+                caption=str(args.get("caption", "")),
+            )
+        if name == "send_file_to_owner":
+            return await self._send_file_to_owner(
+                file_path=str(args.get("file_path", "")),
+                caption=str(args.get("caption", "")),
+            )
         if name == "create_scheduled_task" and self.scheduler:
             # Owner-only tool: owner's own tasks are auto-approved and mounted
             # immediately instead of waiting for an inline approval tap.

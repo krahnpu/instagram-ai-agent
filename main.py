@@ -152,6 +152,9 @@ class ApplicationOrchestrator:
 
         self.user_connector.on_connected = _send_telethon_session_backup
 
+        # Let the agent send files to the owner as real Telegram documents.
+        self.tool_registry.set_file_sender(self.tg_bot.bot)
+
     async def start(self) -> None:
         setup_logger()
         logger.info("Starting Instagram Autonomous AI Agent...")
