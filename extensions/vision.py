@@ -42,6 +42,14 @@ _SUBJECT_LABELS = {
     "other": "چیز دیگر",
 }
 
+_KIND_LABELS = {
+    "photo": "عکس واقعی",
+    "screenshot_web": "اسکرین‌شات از صفحه وب یا جستجوی اینترنتی",
+    "screenshot_chat": "اسکرین‌شات از چت یا پیام‌رسان",
+    "document": "سند یا صفحه متن",
+    "other": "چیز دیگر",
+}
+
 
 # ---------------------------------------------------------------- helpers
 
@@ -150,6 +158,15 @@ def _build_questions(question: str) -> Dict[str, Any]:
                         "object": "An everyday object",
                         "other": "Something else",
                     }},
+        "kind": {"type": "choice",
+                 "instructions": "What kind of image is this?",
+                 "criteria": {
+                     "photo": "A real photo taken with a camera",
+                     "screenshot_web": "A screenshot of a web page or a web search",
+                     "screenshot_chat": "A screenshot of a chat or messaging app",
+                     "document": "A document or a page of text",
+                     "other": "Something else",
+                 }},
     }
 
 
@@ -175,6 +192,9 @@ def _compose_persian(answers: Dict[str, Any], question: str) -> str:
     subj = (answers.get("subject") or {}).get("choice")
     if subj:
         parts.append(f"موضوع اصلی عکس: {_SUBJECT_LABELS.get(subj, subj)}.")
+    kind = (answers.get("kind") or {}).get("choice")
+    if kind:
+        parts.append(f"نوع عکس: {_KIND_LABELS.get(kind, kind)}.")
     if not parts:
         return "چیز مشخصی از عکس نفهمیدم."
     return " ".join(parts)
@@ -274,7 +294,7 @@ def register(registry):
         "describe_image",
         {"type": "function", "function": {
             "name": "describe_image",
-            "description": "Look at a photo (local file path or direct image URL) and describe what is in it, or answer a question about it. Mercury 3 cannot see images, so this uses Mercury Decide vision on the same API.",
+            "description": "Look at a photo (local file path or direct image URL) and describe what is in it, or answer a question about it. Mercury 3 cannot see images, so this uses Mercury Decide vision on the same API. It describes the scene and objects, but it cannot read small text inside screenshots — do not ask it to transcribe text.",
             "parameters": {"type": "object", "properties": {
                 "image_path": {"type": "string", "description": "Local file path of the image, or a direct http(s) image URL."},
                 "question": {"type": "string", "description": "Optional question about the image (for example: is there a cat in this photo?). Without it, the image is described in general."},
