@@ -77,7 +77,7 @@ class AutonomousAgent:
         messages.append({"role": "user", "content": user_message})
 
         execution_trace: List[Dict[str, Any]] = []
-        max_steps = 8
+        max_steps = 12
 
         for step_idx in range(1, max_steps + 1):
             ai_response = await self.ai_client.chat_completion(
@@ -171,17 +171,27 @@ class AutonomousAgent:
                 })
 
         # The model used all its steps without a final message. Never answer
-        # with a robotic line — report what the tools actually did, using the
-        # last tool result's own message (e.g. "فایل برای شما ارسال شد.").
-        fallback_reply = "کارها انجام شد ولی جواب نهایی آماده نشد؛ دوباره بگو چه کار کنم."
+        # with a robotic line — write a short report of what the tools
+        # actually tried, which steps worked, and what the last meaningful
+        # result said, so the owner sees the effort instead of "tell me again
+        # what to do". Ask only for one specific missing thing, if any.
+        tried = [f"گام {t['step']}: {t['tool']} ({t['status']})" for t in execution_trace]
+        last_msg = ""
         for m in reversed(messages):
             if m.get("role") == "tool":
                 try:
                     res = json.loads(m.get("content") or "{}")
-                    fallback_reply = res.get("message") or res.get("error") or fallback_reply
+                    last_msg = res.get("message") or res.get("error") or ""
                 except Exception:
-                    pass
+                    last_msg = ""
                 break
+        if tried:
+            fallback_reply = "تلاش‌های من: " + "، ".join(tried) + "."
+        else:
+            fallback_reply = "هیچ ابزاری اجرا نشد."
+        if last_msg:
+            fallback_reply += f" آخرین نتیجه: {last_msg}"
+        fallback_reply += " اگر اطلاعات بیشتری داری (مثلاً لینک یا اسم دقیق) بفرست تا با آن ادامه بدهم."
         await self.conv_memory.add_message(str(user_id), "assistant", fallback_reply, channel=channel)
         return {
             "status": "موفق",
