@@ -1239,8 +1239,9 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
             for step_item in result.get("trace", []):
                 trace_lines.append(f"• گام {step_item['step']}: <code>{step_item['tool']}</code> ({step_item['status']})")
             # Short conversational answers stay short: no tool trace and no
-            # status footer for them — the trace is only useful for real tasks.
-            if trace_lines and len(result.get("reply", "")) > 200:
+            # status footer for them — the trace is the report of what the
+            # agent did, so it is shown whenever any tool ran.
+            if trace_lines:
                 trace_block = "\n\n🛠 <b>مراحل اجرای ابزارها:</b>\n" + "\n".join(trace_lines)
                 return f"{result['reply']}{trace_block}\n\nوضعیت نهایی: <b>{result['status']}</b>"
             return result["reply"]
