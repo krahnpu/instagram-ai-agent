@@ -182,6 +182,22 @@ class SessionManager:
             return True
         except Exception as exc:
             logger.error(f"Failed to save session file at {target}: {exc}")
+            # Fallback: /etc/secrets on Render is read-only, so a Telegram-uploaded
+            # session can never be saved there. Fall back to the writable /tmp path
+            # and switch the runtime session path to it, instead of failing silently.
+            fallback = Path("/tmp/ig_api/session.json")
+            if target != fallback:
+                try:
+                    fallback.parent.mkdir(parents=True, exist_ok=True)
+                    serialized = json.dumps(session_data, ensure_ascii=False, indent=2)
+                    payload = self.protector.encrypt_if_enabled(serialized)
+                    fallback.write_bytes(payload)
+                    os.chmod(fallback, 0o600)
+                    self.session_path = fallback
+                    logger.info(f"Session saved to fallback writable path {fallback}")
+                    return True
+                except Exception as exc2:
+                    logger.error(f"Failed to save session file at fallback {fallback}: {exc2}")
             return False
 
     def change_session_path(self, new_path: str) -> Path:

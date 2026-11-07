@@ -43,6 +43,12 @@ class PermissionManager:
         "fetch_telegram_channel_media",
         "save_admin_preference",
         "create_scheduled_task",
+        "create_one_off_reminder",
+        "start_telegram_login",
+        "submit_telegram_code",
+        "submit_telegram_2fa",
+        "import_instagram_session",
+        "test_instagram_connection",
         "propose_package_installation",
     }
 

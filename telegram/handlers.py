@@ -1,4 +1,5 @@
 from io import BytesIO
+import re
 from typing import Any, Dict
 from aiogram import Dispatcher, F
 from aiogram.filters import Command
@@ -432,7 +433,7 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
             return
 
         if err := _deny_if_not_owner(uid):
-            await callback.answer(err, show_alert=True)
+            await callback.answer(err[:200], show_alert=True)
             return
 
         if data == "cmd_models_menu":
@@ -745,6 +746,92 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
                     else:
                         await message.answer(f"❌ {res.get('error')}")
                     return
+
+        # 2b. Natural-language intent routing (Owner only): the AI agent has no
+        # login/session/timer tools, so plain-text intents must start the matching
+        # wizard directly instead of falling through to the agent, which would
+        # reply "I don't have a tool for that".
+        if perms.is_owner(uid):
+            _fa_digits = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+            norm_text = text.translate(_fa_digits)
+            clean_phone = re.sub(r"[\s\-]", "", norm_text)
+
+            # (a) Phone number -> Telethon login. Use saved/env TG_API_ID &
+            # TG_API_HASH when present, so the owner only sends the phone.
+            if re.fullmatch(r"\+?\d{8,15}", clean_phone):
+                if manager.user_connector:
+                    creds = await manager.user_connector.get_saved_credentials()
+                    if creds.get("api_id") and creds.get("api_hash"):
+                        res = await manager.user_connector.begin_interactive_login(
+                            api_id=int(creds["api_id"]),
+                            api_hash=str(creds["api_hash"]),
+                            phone=clean_phone,
+                        )
+                        if res["status"] == "code_sent":
+                            wizard_states[uid] = {"wizard": "tg_login", "step": "awaiting_code", "data": {}}
+                            await message.answer(
+                                "📩 <b>کد تأیید تلگرام ارسال شد.</b>\n"
+                                "لطفاً کد را (مثلاً <code>1 2 3 4 5</code>) ارسال کنید:"
+                            )
+                        elif res["status"] == "already_authorized":
+                            await message.answer(f"✅ {res['message']}")
+                        else:
+                            await message.answer(f"❌ خطا در ارسال کد: {res.get('error')}")
+                    else:
+                        wizard_states[uid] = {"wizard": "tg_login", "step": "awaiting_api_id", "data": {}}
+                        await message.answer(
+                            "📱 <b>اتصال حساب تلگرام (Telethon)</b>\n\n"
+                            "🔹 <b>مرحله ۱ از ۵:</b> لطفاً عدد <code>API ID</code> را ارسال کنید:"
+                        )
+                else:
+                    await message.answer("❌ اتصال حساب تلگرام در این نسخه فعال نیست.")
+                return
+
+            # (b) Pasted Instagram session / cookies JSON -> import & verify.
+            stripped = text.strip()
+            if stripped.startswith(("[", "{")) and any(
+                k in stripped for k in ("sessionid", "csrftoken", "ds_user_id", "cookies", "uuids", "authorization_data")
+            ):
+                res = await manager.ig_client.import_and_verify_session_json(text)
+                if res.get("status") == "connected":
+                    await message.answer(
+                        "✅ <b>اتصال اینستاگرام با موفقیت برقرار و Session ذخیره شد!</b>\n\n"
+                        f"• فرمت ورودی: <code>{res.get('detected_format')}</code>\n"
+                        f"• اکانت متصل: <code>@{res.get('username')}</code>"
+                    )
+                elif res.get("status") == "invalid_format":
+                    await message.answer(
+                        "❌ <b>فرمت Session ارسالی قابل استفاده نیست</b>\n\n"
+                        f"• علت: {res.get('error')}\n"
+                        f"• راهنما: {res.get('hint')}"
+                    )
+                else:
+                    await message.answer(f"❌ <b>خطا در بررسی Session:</b>\n{res.get('error')}")
+                return
+
+            # (c) One-off reminder: "بعد از ۳۰ ثانیه بهم پیام بده" / "in 30 seconds message me"
+            rem = re.search(
+                r"(?:بعد از|after|in)\s*(\d+)\s*(ثانیه|دقیقه|ساعت|seconds?|minutes?|hours?)",
+                norm_text,
+                re.IGNORECASE,
+            )
+            if rem and any(k in norm_text for k in ("پیام", "یادآوری", "message", "remind", "یادم")):
+                amount = int(rem.group(1))
+                unit = rem.group(2)
+                delay = amount * (1 if unit.startswith(("ثانیه", "second")) else 60 if unit.startswith(("دقیقه", "minute")) else 3600)
+                delay = max(5, min(delay, 24 * 3600))
+                reminder_text = (
+                    f"⏰ <b>یادآوری درخواستی شما</b>\n"
+                    f"گفتید بعد از {amount} {unit} به شما پیام بدهم — این همان پیام است. ✅"
+                )
+                res = await manager.scheduler.create_one_off_reminder(chat_id, delay, reminder_text)
+                if res.get("ok"):
+                    await message.answer(
+                        f"⏰ <b>یادآوری تنظیم شد.</b>\nبعد از {amount} {unit} همین‌جا به شما پیام می‌دهم."
+                    )
+                else:
+                    await message.answer(f"❌ نتوانستم یادآوری را تنظیم کنم: {res.get('error')}")
+                return
 
         # 3. Standard Natural Language Processing using Telegram Rich Message Draft (<tg-thinking>Thinking…</tg-thinking>)
         async def _execute_with_draft_updates(update_progress: Any) -> str:

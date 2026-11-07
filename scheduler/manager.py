@@ -1,7 +1,7 @@
 import json
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -196,6 +196,28 @@ class SchedulerManager:
                 "عدم پردازش تکراری (processed_events) روی این تسک فعال است."
             ),
         }
+
+    async def create_one_off_reminder(
+        self, chat_id: int, delay_seconds: int, reminder_text: str
+    ) -> Dict[str, Any]:
+        """
+        One-off reminder that actually sends a message to the owner after the
+        requested delay (e.g. "message me in 30 seconds"). Uses a APScheduler
+        'date' trigger; unlike recurring tasks it needs no approval tap.
+        """
+        delay = max(5, min(int(delay_seconds), 24 * 3600))
+        run_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        job_id = f"rem_{uuid.uuid4().hex[:8]}"
+        try:
+            async def _fire() -> None:
+                if self.notify_callback:
+                    await self.notify_callback(reminder_text)
+
+            self.scheduler.add_job(_fire, DateTrigger(run_date=run_at), id=job_id)
+            return {"ok": True, "job_id": job_id, "run_at": run_at.isoformat(), "delay_seconds": delay}
+        except Exception as exc:
+            logger.error(f"Failed to schedule one-off reminder: {exc}")
+            return {"ok": False, "error": str(exc)}
 
     async def create_task_from_natural_language(
         self,

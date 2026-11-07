@@ -281,6 +281,81 @@ class ToolRegistry:
             {
                 "type": "function",
                 "function": {
+                    "name": "start_telegram_login",
+                    "description": "Start Telethon user-account login: send a Telegram login code to the owner's phone using saved/env TG_API_ID and TG_API_HASH when available. Use this when the owner asks to log in to Telegram or sends a phone number.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "phone": {"type": "string", "description": "Phone number with country code, e.g. +17628218662"},
+                            "api_id": {"type": "integer", "description": "Telegram API ID (optional, saved credentials are used when omitted)"},
+                            "api_hash": {"type": "string", "description": "Telegram API hash (optional, saved credentials are used when omitted)"},
+                        },
+                        "required": ["phone"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "submit_telegram_code",
+                    "description": "Submit the Telegram login verification code received by SMS/Telegram.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"code": {"type": "string", "description": "Verification code, digits only"}},
+                        "required": ["code"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "submit_telegram_2fa",
+                    "description": "Submit the Telegram two-step verification (2FA) cloud password.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"password": {"type": "string", "description": "Two-step verification password"}},
+                        "required": ["password"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "import_instagram_session",
+                    "description": "Import an Instagram session from pasted JSON (Instagrapi settings, browser cookie array, or flat cookie dict), save it and verify the connection. Use this when the owner pastes session JSON or cookies.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"raw_json": {"type": "string", "description": "Raw session/cookie JSON text"}},
+                        "required": ["raw_json"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "test_instagram_connection",
+                    "description": "Test the current Instagram session connection and report the connected username or login_required.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_one_off_reminder",
+                    "description": "Send the owner a message in this chat after a one-off delay (e.g. in 30 seconds, in 10 minutes). This is a single reminder, not a recurring task, and needs no approval.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "delay_seconds": {"type": "integer", "description": "Delay in seconds, e.g. 30"},
+                            "message": {"type": "string", "description": "Message text to send when the time is up"},
+                        },
+                        "required": ["delay_seconds", "message"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "propose_package_installation",
                     "description": "Propose installing a required Python package in the virtualenv, awaiting Owner confirmation.",
                     "parameters": {
@@ -347,7 +422,34 @@ class ToolRegistry:
             await self.lt_memory.set_preference(args["key"], args["value"])
             return {"status": "ok", "key": args["key"], "value": args["value"]}
         if name == "create_scheduled_task" and self.scheduler:
-            return await self.scheduler.create_task_from_natural_language(args.get("instruction", ""))
+            # Owner-only tool: owner's own tasks are auto-approved and mounted
+            # immediately instead of waiting for an inline approval tap.
+            return await self.scheduler.create_task_from_natural_language(
+                args.get("instruction", ""), auto_approve=True
+            )
+        if name == "start_telegram_login" and self.user_connector:
+            creds = await self.user_connector.get_saved_credentials()
+            api_id = args.get("api_id") or creds.get("api_id")
+            api_hash = args.get("api_hash") or creds.get("api_hash")
+            if not api_id or not api_hash:
+                return {"status": "error", "error": "API ID و API HASH تنظیم نشده‌اند. ابتدا آن‌ها را ارسال کنید."}
+            return await self.user_connector.begin_interactive_login(
+                api_id=int(api_id), api_hash=str(api_hash), phone=str(args.get("phone", "")).strip()
+            )
+        if name == "submit_telegram_code" and self.user_connector:
+            return await self.user_connector.submit_verification_code(str(args.get("code", "")).strip())
+        if name == "submit_telegram_2fa" and self.user_connector:
+            return await self.user_connector.submit_two_factor_password(str(args.get("password", "")))
+        if name == "import_instagram_session":
+            return await self.ig_client.import_and_verify_session_json(str(args.get("raw_json", "")))
+        if name == "test_instagram_connection":
+            return await self.ig_client.initialize_session()
+        if name == "create_one_off_reminder" and self.scheduler:
+            return await self.scheduler.create_one_off_reminder(
+                chat_id=0,
+                delay_seconds=int(args.get("delay_seconds", 30)),
+                reminder_text=str(args.get("message", "⏰ یادآوری درخواستی شما")),
+            )
         if name == "propose_package_installation" and self.self_extender:
             return self.self_extender.propose_package_install(
                 package_name=args["package_name"],
