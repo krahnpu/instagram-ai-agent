@@ -137,8 +137,9 @@ class ToolRegistry:
         if err:
             logger.error(f"Extension tool '{name}' schema invalid, rejected: {err}")
             raise ValueError(
-                f"اسکیمای ابزار '{name}' درست نیست ({err})؛ "
-                "داخل اسکیما فقط type با مقدار 'function' و name و description و parameters بگذار، نه خود تابع را."
+                f"اسکیمای ابزار '{name}' درست نیست ({err}). "
+                "قالب درست فقط این است: {\"type\": \"function\", \"function\": {\"name\": \"<نام ابزار>\", \"description\": \"<چه کار می‌کند>\", \"parameters\": {\"type\": \"object\", \"properties\": {...}, \"required\": [...]}}}. "
+                "تابع را فقط به عنوان آرگومان سوم register_extension_tool بده و هرگز داخل اسکیما نگذار."
             )
         self.extension_tools[name] = handler
         self.extension_schemas = [s for s in self.extension_schemas if s["function"]["name"] != name]
@@ -677,12 +678,12 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": "save_code_extension",
-                    "description": "Save a self-written extension module (Python code you wrote to add a missing capability) under extensions/<name>.py, after the owner approved adding it. The code is syntax-checked; a broken module is rejected. After saving, it is loaded live and its tools become available. Tell the owner the extension lives only until the next redeploy unless it is added to the repo.",
+                    "description": "Save a self-written extension module (Python code you wrote to add a missing capability) under extensions/<name>.py, after the owner approved adding it. The code is syntax-checked; a broken module is rejected. After saving, it is loaded live and its tools become available. Tell the owner the extension lives only until the next redeploy unless it is added to the repo. Every tool schema MUST use this exact shape: {\"type\": \"function\", \"function\": {\"name\": \"<tool_name>\", \"description\": \"<what it does>\", \"parameters\": {\"type\": \"object\", \"properties\": {\"arg\": {\"type\": \"string\"}}, \"required\": [\"arg\"]}}}. Register with registry.register_extension_tool(\"<tool_name>\", <that schema dict>, <handler function>) — the handler goes ONLY as the third argument, never inside the schema, and the top-level type is always \"function\", never \"object\". A schema that breaks these rules is rejected and the tool never loads.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "name": {"type": "string", "description": "Short snake_case module name, e.g. telegram_dialogs"},
-                            "code": {"type": "string", "description": "Full Python source of the module. It must define register(registry) and call registry.register_extension_tool for each new tool."},
+                            "code": {"type": "string", "description": "Full Python source of the module. It must define register(registry) and call registry.register_extension_tool(name, schema, handler) for each new tool, where schema is exactly {\"type\": \"function\", \"function\": {\"name\": name, \"description\": ..., \"parameters\": {\"type\": \"object\", \"properties\": {...}, \"required\": [...]}}} and handler is passed ONLY as the third argument, never inside the schema."},
                             "description": {"type": "string", "description": "What the extension adds and why"},
                         },
                         "required": ["name", "code"],
@@ -892,15 +893,18 @@ class ToolRegistry:
                 loaded = load_extensions(self)
                 result["loaded_now"] = loaded
                 if result.get("name") not in loaded:
-                    # The module failed to load (e.g. a tool schema that is
-                    # not JSON-serializable) — say so clearly instead of
-                    # claiming success while the tool never went live.
+                    # The module failed to load (e.g. a tool schema with the
+                    # wrong shape) — say so clearly, WITH the correct
+                    # template, instead of claiming success while the tool
+                    # never went live.
                     return {
                         "status": "error",
                         "error": (
                             f"افزونه {result.get('name', '')} ذخیره شد ولی بارگذاری نشد؛ "
-                            "احتمالا اسکیمای ابزار داخل آن قابل تبدیل به JSON نیست. "
-                            "لاگ را با read_recent_logs بررسی کن و اسکیما را اصلاح کن."
+                            "اسکیمای ابزار داخل آن قالب درست را ندارد. "
+                            "قالب درست فقط این است: {\"type\": \"function\", \"function\": {\"name\": \"<نام ابزار>\", \"description\": \"<چه کار می‌کند>\", \"parameters\": {\"type\": \"object\", \"properties\": {...}, \"required\": [...]}}}. "
+                            "تابع را فقط به عنوان آرگومان سوم register_extension_tool بده و هرگز داخل اسکیما نگذار. "
+                            "لاگ را با read_recent_logs بررسی کن، اسکیما را با همین قالب اصلاح کن و دوباره ذخیره کن."
                         ),
                         "path": result.get("path", ""),
                     }
