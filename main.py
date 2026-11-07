@@ -127,6 +127,31 @@ class ApplicationOrchestrator:
             self_extender=self.self_extender,
         )
 
+        # After a successful Telethon login, send the .session file to the
+        # owner as a backup: on Render Free the container disk is wiped on
+        # every redeploy, so without this backup the login would be forgotten.
+        async def _send_telethon_session_backup() -> None:
+            try:
+                from pathlib import Path as _Path
+                from aiogram.types import FSInputFile as _FSInputFile
+
+                session_path = _Path(settings.TG_SESSION_PATH)
+                if not session_path.exists() or not self.tg_bot.bot:
+                    return
+                await self.tg_bot.bot.send_document(
+                    settings.TELEGRAM_OWNER_ID,
+                    _FSInputFile(str(session_path)),
+                    caption=(
+                        "💾 <b>بکاپ Session تلگرام</b>\n"
+                        "این فایل را نگه دارید. اگر سرویس دوباره دیپلوی شد و لاگین تلگرام فراموش شد، "
+                        "همین فایل را به ربات بفرستید تا بدون کد دوباره وصل شود."
+                    ),
+                )
+            except Exception as exc:
+                logger.error(f"Failed to send Telethon session backup: {exc}")
+
+        self.user_connector.on_connected = _send_telethon_session_backup
+
     async def start(self) -> None:
         setup_logger()
         logger.info("Starting Instagram Autonomous AI Agent...")

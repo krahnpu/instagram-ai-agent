@@ -1,9 +1,11 @@
 from io import BytesIO
 import re
+from pathlib import Path
 from typing import Any, Dict
 from aiogram import Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery
+from config import settings
 from core.permissions import PermissionManager
 from telegram.keyboards import (
     build_main_menu_keyboard,
@@ -383,7 +385,32 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
             return
 
         doc = message.document
-        if not doc or not (doc.file_name or "").lower().endswith(".json"):
+        if not doc:
+            return
+        file_name = (doc.file_name or "").lower()
+
+        # Telethon .session backup restore: save the file and reconnect.
+        # This is how a login survives a redeploy (which wipes the disk).
+        if file_name.endswith(".session"):
+            if not manager.bot:
+                return
+            buf = BytesIO()
+            await manager.bot.download(doc, destination=buf)
+            session_path = Path(settings.TG_SESSION_PATH)
+            session_path.parent.mkdir(parents=True, exist_ok=True)
+            session_path.write_bytes(buf.getvalue())
+            if manager.user_connector:
+                await manager.user_connector.start()
+                if manager.user_connector.is_connected:
+                    await message.answer("✅ <b>Session تلگرام بازیابی شد و حساب متصل است!</b>")
+                else:
+                    await message.answer(
+                        "⚠️ فایل Session ذخیره شد اما حساب هنوز متصل نیست. "
+                        "ممکن است Session منقضی شده باشد؛ با ارسال شماره تلفن دوباره لاگین کنید."
+                    )
+            return
+
+        if not file_name.endswith(".json"):
             await message.answer("⚠️ لطفاً یک فایل با پسوند <code>.json</code> حاوی Session یا Cookie اینستاگرام ارسال کنید.")
             return
 

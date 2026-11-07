@@ -35,11 +35,23 @@ class TelegramUserAccountConnector:
         # the next digits-only message from the owner is the 2FA password,
         # NOT a new phone number or login code.
         self._awaiting_2fa: bool = False
+        # Called after a successful Telethon login (set by the orchestrator):
+        # used to send the .session file to the owner as a backup.
+        self.on_connected: Optional[Any] = None
 
     async def start(self) -> None:
         creds = await self.get_saved_credentials()
         api_id = creds["api_id"]
         api_hash = creds["api_hash"]
+        # Restore a pending login interrupted by a process restart / spin-down:
+        # the phone, code hash and 2FA flag live in SQLite (disk survives a
+        # restart within the same deploy; RAM does not).
+        self._pending_phone = await self.lt_memory.get_preference("tg_pending_phone", "") or None
+        saved_hash_enc = await self.lt_memory.get_preference("tg_pending_phone_code_hash", "")
+        self._pending_phone_code_hash = (
+            self.protector.decrypt_if_needed(saved_hash_enc.encode("utf-8")) if saved_hash_enc else None
+        )
+        self._awaiting_2fa = (await self.lt_memory.get_preference("tg_awaiting_2fa", "")) == "1"
         if not api_id or not api_hash:
             return
         try:
@@ -48,10 +60,37 @@ class TelegramUserAccountConnector:
             self.client = TelegramClient(str(session_file), api_id, api_hash)
             await self.client.connect()
             self.is_connected = await self.client.is_user_authorized()
+            if self.is_connected:
+                await self._clear_pending_login()
             logger.info(f"Telethon user client initialized (authorized={self.is_connected})")
         except Exception as exc:
             logger.error(f"Telethon initialization error: {exc}")
             self.is_connected = False
+
+    async def _save_pending_login(self) -> None:
+        await self.lt_memory.set_preference("tg_pending_phone", self._pending_phone or "")
+        enc_hash = (
+            self.protector.encrypt_if_enabled(self._pending_phone_code_hash or "").decode("utf-8")
+            if self._pending_phone_code_hash
+            else ""
+        )
+        await self.lt_memory.set_preference("tg_pending_phone_code_hash", enc_hash)
+        await self.lt_memory.set_preference("tg_awaiting_2fa", "1" if self._awaiting_2fa else "")
+
+    async def _clear_pending_login(self) -> None:
+        self._pending_phone = None
+        self._pending_phone_code_hash = None
+        self._awaiting_2fa = False
+        await self.lt_memory.set_preference("tg_pending_phone", "")
+        await self.lt_memory.set_preference("tg_pending_phone_code_hash", "")
+        await self.lt_memory.set_preference("tg_awaiting_2fa", "")
+
+    async def _notify_connected(self) -> None:
+        if self.on_connected:
+            try:
+                await self.on_connected()
+            except Exception as exc:
+                logger.error(f"Telethon on_connected callback error: {exc}")
 
     async def get_saved_credentials(self) -> Dict[str, Any]:
         saved_id = await self.lt_memory.get_preference("tg_user_api_id", "")
@@ -86,6 +125,7 @@ class TelegramUserAccountConnector:
             sent = await self.client.send_code_request(phone.strip())
             self._pending_phone = phone.strip()
             self._pending_phone_code_hash = sent.phone_code_hash
+            await self._save_pending_login()
             return {
                 "status": "code_sent",
                 "phone": self._pending_phone,
@@ -109,7 +149,9 @@ class TelegramUserAccountConnector:
             )
             self.is_connected = True
             self._awaiting_2fa = False
+            await self._clear_pending_login()
             me = await self.client.get_me()
+            await self._notify_connected()
             return {
                 "status": "connected",
                 "username": getattr(me, "username", "") or str( getattr(me, "id", "")),
@@ -117,6 +159,7 @@ class TelegramUserAccountConnector:
             }
         except SessionPasswordNeededError:
             self._awaiting_2fa = True
+            await self._save_pending_login()
             return {
                 "status": "two_factor_required",
                 "message": "تأیید دومرحله‌ای (Two-Step Verification) روی این حساب فعال است. لطفاً رمز عبور دومرحله‌ای را ارسال کنید.",
@@ -134,7 +177,9 @@ class TelegramUserAccountConnector:
             await self.client.sign_in(password=password)
             self.is_connected = True
             self._awaiting_2fa = False
+            await self._clear_pending_login()
             me = await self.client.get_me()
+            await self._notify_connected()
             return {
                 "status": "connected",
                 "username": getattr(me, "username", "") or str(getattr(me, "id", "")),
