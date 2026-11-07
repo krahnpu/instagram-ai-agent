@@ -12,6 +12,40 @@ from utils.logger import get_logger
 logger = get_logger("core.tools")
 
 
+def _validate_tool_schema(schema: Dict[str, Any]) -> str:
+    """Check an extension tool schema is a valid OpenAI-style function
+    schema AND JSON-serializable. Returns an error message, or "" if valid.
+
+    A schema with the wrong shape (e.g. type "object" instead of
+    "function") serializes fine as JSON but the AI provider rejects the
+    whole request with HTTP 400 "Input should be 'function'" — and since
+    the bad schema stays registered, EVERY later AI call fails the same
+    way. So shape is validated here, not just serializability.
+    """
+    if not isinstance(schema, dict):
+        return "اسکیما باید یک دیکشنری باشد."
+    if schema.get("type") != "function":
+        return f"نوع ابزار (type) باید 'function' باشد، نه {schema.get('type')!r}."
+    fn = schema.get("function")
+    if not isinstance(fn, dict):
+        return "بخش function اسکیما باید یک دیکشنری باشد."
+    name = fn.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return "نام ابزار (function.name) باید یک رشته غیرخالی باشد."
+    params = fn.get("parameters", {"type": "object", "properties": {}})
+    if not isinstance(params, dict):
+        return "بخش parameters باید یک دیکشنری باشد."
+    if params.get("type", "object") != "object":
+        return "نوع parameters باید 'object' باشد."
+    if not isinstance(params.get("properties", {}), dict):
+        return "بخش properties باید یک دیکشنری باشد."
+    try:
+        json.dumps(schema, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        return f"اسکیما قابل تبدیل به JSON نیست: {exc}"
+    return ""
+
+
 def load_extensions(registry: "ToolRegistry") -> List[str]:
     """Import every module in extensions/ and let it register its own tools
     via register(registry). A broken module is logged and skipped — it can
@@ -92,19 +126,19 @@ class ToolRegistry:
         """Register one tool from a self-written extension module. The
         handler may be sync or async and receives the tool arguments dict.
 
-        The schema must be plain JSON data (OpenAI function-calling format:
-        only name/description/parameters — never the handler function or any
-        other Python object inside it). A schema that cannot be JSON-encoded
-        would break EVERY later AI call with "Object of type function is not
-        JSON serializable", so it is rejected here instead of registered.
+        The schema must be a valid OpenAI function-calling schema made of
+        plain JSON data: {"type": "function", "function": {"name": ...,
+        "description": ..., "parameters": {...}}} — never the handler
+        function or any other Python object inside it, and never type
+        "object" at the top level. A bad schema would break EVERY later
+        AI call, so it is rejected here instead of registered.
         """
-        try:
-            json.dumps(schema, ensure_ascii=False)
-        except (TypeError, ValueError) as exc:
-            logger.error(f"Extension tool '{name}' schema is not JSON serializable, rejected: {exc}")
+        err = _validate_tool_schema(schema)
+        if err:
+            logger.error(f"Extension tool '{name}' schema invalid, rejected: {err}")
             raise ValueError(
-                f"اسکیمای ابزار '{name}' قابل تبدیل به JSON نیست ({exc})؛ "
-                "داخل اسکیما فقط name و description و parameters بگذار، نه خود تابع را."
+                f"اسکیمای ابزار '{name}' درست نیست ({err})؛ "
+                "داخل اسکیما فقط type با مقدار 'function' و name و description و parameters بگذار، نه خود تابع را."
             )
         self.extension_tools[name] = handler
         self.extension_schemas = [s for s in self.extension_schemas if s["function"]["name"] != name]
@@ -716,16 +750,16 @@ class ToolRegistry:
 
         if role == Role.OWNER:
             # Defense in depth: never let a bad extension schema poison the
-            # AI request — a single non-serializable schema breaks every
-            # chat_completion call, so skip (and log) any that fail encoding.
+            # AI request — one malformed schema breaks every
+            # chat_completion call, so skip (and log) any that fail validation.
             safe_extension_schemas: List[Dict[str, Any]] = []
             for schema in self.extension_schemas:
-                try:
-                    json.dumps(schema, ensure_ascii=False)
-                    safe_extension_schemas.append(schema)
-                except (TypeError, ValueError) as exc:
-                    bad_name = (schema or {}).get("function", {}).get("name", "?")
-                    logger.error(f"Skipping non-serializable extension schema '{bad_name}': {exc}")
+                err = _validate_tool_schema(schema)
+                if err:
+                    bad_name = (schema or {}).get("function", {}).get("name", "?") if isinstance(schema, dict) else "?"
+                    logger.error(f"Skipping invalid extension schema '{bad_name}': {err}")
+                    continue
+                safe_extension_schemas.append(schema)
             return all_tools + safe_extension_schemas
 
         return [
