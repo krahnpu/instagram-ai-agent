@@ -991,9 +991,12 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
             trace_lines = []
             for step_item in result.get("trace", []):
                 trace_lines.append(f"• گام {step_item['step']}: <code>{step_item['tool']}</code> ({step_item['status']})")
-            trace_block = ("\n\n🛠 <b>مراحل اجرای ابزارها:</b>\n" + "\n".join(trace_lines)) if trace_lines else ""
-
-            return f"{result['reply']}{trace_block}\n\nوضعیت نهایی: <b>{result['status']}</b>"
+            # Short conversational answers stay short: no tool trace and no
+            # status footer for them — the trace is only useful for real tasks.
+            if trace_lines and len(result.get("reply", "")) > 200:
+                trace_block = "\n\n🛠 <b>مراحل اجرای ابزارها:</b>\n" + "\n".join(trace_lines)
+                return f"{result['reply']}{trace_block}\n\nوضعیت نهایی: <b>{result['status']}</b>"
+            return result["reply"]
 
         await manager.rich_responder.run_with_thinking_stream(
             chat_id=chat_id,

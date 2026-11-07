@@ -52,6 +52,7 @@ class PermissionManager:
         "create_and_send_file",
         "send_file_to_owner",
         "get_server_resources",
+        "get_current_datetime",
         "create_one_off_reminder",
         "start_telegram_login",
         "submit_telegram_code",

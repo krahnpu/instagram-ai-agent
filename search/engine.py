@@ -46,10 +46,25 @@ class WebSearchEngine:
             else None
         )
 
-        raw_results = await web_task
+        raw_results = []
+        try:
+            raw_results = await web_task
+        except Exception as exc:
+            logger.warning(f"DuckDuckGo search failed, trying Bing fallback: {exc}")
         if gh_task:
-            gh_results = await gh_task
-            raw_results = gh_results + raw_results
+            try:
+                gh_results = await gh_task
+                raw_results = gh_results + raw_results
+            except Exception as exc:
+                logger.warning(f"GitHub releases search failed: {exc}")
+        if not raw_results:
+            # DuckDuckGo often returns nothing from datacenter IPs — fall back
+            # to Bing so a search question still gets an answer.
+            try:
+                raw_results = await self._search_bing(clean_query, max_results=settings.SEARCH_MAX_RESULTS)
+            except Exception as exc:
+                logger.warning(f"Bing fallback search failed: {exc}")
+                raw_results = []
 
         if not raw_results:
             return {
@@ -135,6 +150,32 @@ class WebSearchEngine:
                         })
         except Exception as exc:
             logger.error(f"Live web search error: {exc}")
+        return results
+
+    async def _search_bing(self, query: str, max_results: int = 6) -> List[Dict[str, str]]:
+        """Fallback when DuckDuckGo returns nothing (common from datacenter IPs)."""
+        url = f"https://www.bing.com/search?q={quote_plus(query)}"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/128.0.0.0 Safari/537.36"
+        }
+        results: List[Dict[str, str]] = []
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for row in soup.select(".b_algo")[:max_results]:
+                    link_el = row.select_one("h2 a")
+                    snippet_el = row.select_one(".b_caption p") or row.select_one("p")
+                    href = str(link_el.get("href")) if link_el and link_el.get("href") else ""
+                    if link_el and href.startswith("http"):
+                        results.append({
+                            "title": link_el.get_text(strip=True),
+                            "url": href,
+                            "snippet": snippet_el.get_text(strip=True) if snippet_el else "",
+                        })
+        except Exception as exc:
+            logger.error(f"Bing fallback search error: {exc}")
         return results
 
     async def _search_github_releases(self, query: str) -> List[Dict[str, str]]:

@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 from config import settings
 from core.permissions import Role, PermissionManager
-from utils.helpers import get_vps_resource_snapshot
+from utils.helpers import get_vps_resource_snapshot, get_current_datetime
 
 
 class ToolRegistry:
@@ -331,7 +331,7 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": "start_telegram_login",
-                    "description": "Start Telethon user-account login: send a Telegram login code to the owner's phone using saved/env TG_API_ID and TG_API_HASH when available. Use this when the owner asks to log in to Telegram or sends a phone number.",
+                    "description": "Start Telethon user-account login: send a Telegram login code to the owner's phone using saved TG_API_ID and TG_API_HASH when available. If they are missing, ask the owner right here in chat for the API ID, API hash and phone number, then call this tool again with all three — the credentials are saved automatically (encrypted) and no code or variable change is ever needed. Use this when the owner asks to log in to Telegram or sends a phone number.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -472,6 +472,19 @@ class ToolRegistry:
             {
                 "type": "function",
                 "function": {
+                    "name": "get_current_datetime",
+                    "description": "Get the current date and time right now (server clock) in a timezone, with the Persian (Jalali) date and Persian weekday. Use this for ANY question about the current time or date (what time is it, what is today's date, in Iran or any city) — never use web_search for that and never claim you cannot know the time.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "timezone": {"type": "string", "description": "IANA timezone, e.g. Asia/Tehran for Iran, America/Montreal for Montreal. Default Asia/Tehran."},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "create_and_send_file",
                     "description": "Create a file from text content and send it to the owner as a real Telegram document attachment. Use this whenever the owner asks for a file (for example an HTML game, a script, a text file): build the complete content and send it as a file — never paste long code as a chat message instead. Filename only, no folders.",
                     "parameters": {
@@ -594,6 +607,8 @@ class ToolRegistry:
             return await self.user_connector.get_account_status()
         if name == "get_server_resources":
             return {"status": "ok", **get_vps_resource_snapshot()}
+        if name == "get_current_datetime":
+            return {"status": "ok", **get_current_datetime(str(args.get("timezone") or "Asia/Tehran"))}
         if name == "create_and_send_file":
             return await self._send_file_to_owner(
                 filename=str(args.get("filename", "")),
