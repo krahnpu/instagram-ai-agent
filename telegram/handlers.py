@@ -1210,9 +1210,30 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
                     text = f"کاربر روی این پیام ریپلای کرده: «{quoted}»\n\nدستور کاربر: {text}"
 
         # 3. Standard Natural Language Processing using Telegram Rich Message Draft (<tg-thinking>Thinking…</tg-thinking>)
+        # Progress labels per tool, so a long download/search shows what is
+        # happening instead of one frozen "thinking" line for minutes.
+        _STEP_LABELS = {
+            "download_media": "<b>در حال دانلود… ⬇️</b>",
+            "identify_song": "<b>در حال شناسایی آهنگ… 🎵</b>",
+            "find_song_of_video": "<b>در حال پیدا کردن آهنگ ویدیو… 🎵</b>",
+            "describe_image": "<b>در حال دیدن عکس… 👀</b>",
+            "describe_video": "<b>در حال دیدن ویدیو… 👀</b>",
+            "web_search": "<b>در حال جستجو… 🔍</b>",
+        }
+
         async def _execute_with_draft_updates(update_progress: Any) -> str:
             await update_progress("<b>در حال تحلیل دستور و انتخاب ابزار… ✨</b>")
-            result = await manager.agent.process_command(user_id=uid, user_message=text, channel="telegram")
+
+            async def _on_agent_step(step_idx: int, tool_name: str, phase: str) -> None:
+                if phase == "start":
+                    label = _STEP_LABELS.get(tool_name, f"<b>در حال اجرای {tool_name}…</b>")
+                    await update_progress(label)
+                else:
+                    await update_progress("<b>در حال تحلیل نتیجه… ✨</b>")
+
+            result = await manager.agent.process_command(
+                user_id=uid, user_message=text, channel="telegram", on_step=_on_agent_step,
+            )
 
             trace_lines = []
             for step_item in result.get("trace", []):
