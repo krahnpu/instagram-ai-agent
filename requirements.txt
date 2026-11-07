@@ -14,3 +14,5 @@ duckduckgo-search>=6.3.0
 cryptography>=43.0.1
 python-dotenv>=1.0.1
 psutil>=6.0.0
+yt-dlp>=2024.1.0
+shazamio>=0.7.0
