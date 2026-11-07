@@ -22,7 +22,7 @@ from instagram.music import InstagramMusicManager
 from instagram.content_manager import InstagramContentManager
 from content.duplicate_detector import DuplicateDetector
 from content.media_processor import MediaProcessor
-from core.tools import ToolRegistry
+from core.tools import ToolRegistry, load_extensions
 from core.agent import AutonomousAgent
 from scheduler.manager import SchedulerManager
 from telegram.bot import TelegramBotManager
@@ -157,6 +157,38 @@ class ApplicationOrchestrator:
         # the tools resolve it lazily at send time.
         self.tool_registry.set_file_sender(self.tg_bot)
 
+        # Load self-written extension modules (extensions/*.py), if any.
+        # A broken module is logged and skipped — it never stops startup.
+        loaded_extensions = load_extensions(self.tool_registry)
+        if loaded_extensions:
+            logger.info(f"Loaded extensions: {loaded_extensions}")
+
+        # Problems reported by the background self-check, so the owner is
+        # only notified when something NEW goes wrong (no repeat spam).
+        self._last_self_check_problems: frozenset = frozenset()
+
+    async def _background_self_check(self) -> None:
+        """Runs every 30 minutes while the service is awake: checks the
+        agent's own health and tells the owner only when a new problem
+        appears (or when all problems are resolved)."""
+        try:
+            result = await self.tool_registry.invoke("run_self_check", {})
+        except Exception as exc:
+            logger.error(f"Background self-check failed: {exc}")
+            return
+        problems = frozenset(result.get("problems") or [])
+        if problems == self._last_self_check_problems:
+            return
+        self._last_self_check_problems = problems
+        if problems:
+            text = "بررسی دوره‌ای: مشکل پیدا شد:\n" + "\n".join(f"- {p}" for p in sorted(problems))
+        else:
+            text = "بررسی دوره‌ای: همه مشکل‌ها حل شد؛ اینستاگرام و یوزربات وصل‌اند."
+        try:
+            await self.tg_bot.notify_owner(text)
+        except Exception as exc:
+            logger.error(f"Failed to notify owner about self-check: {exc}")
+
     async def start(self) -> None:
         setup_logger()
         logger.info("Starting Instagram Autonomous AI Agent...")
@@ -174,6 +206,20 @@ class ApplicationOrchestrator:
 
         # Start persistent job scheduler
         await self.scheduler.start(notify_callback=self.tg_bot.notify_owner)
+
+        # Background self-check every 30 minutes while the service is awake
+        # (reports only NEW problems to the owner).
+        try:
+            from apscheduler.triggers.interval import IntervalTrigger
+
+            self.scheduler.scheduler.add_job(
+                self._background_self_check,
+                trigger=IntervalTrigger(minutes=30),
+                id="self_check",
+                replace_existing=True,
+            )
+        except Exception as exc:
+            logger.error(f"Could not schedule background self-check: {exc}")
 
         # Start Telegram Bot Manager
         await self.tg_bot.start()

@@ -73,7 +73,7 @@ class AutonomousAgent:
         messages.append({"role": "user", "content": user_message})
 
         execution_trace: List[Dict[str, Any]] = []
-        max_steps = 6
+        max_steps = 8
 
         for step_idx in range(1, max_steps + 1):
             ai_response = await self.ai_client.chat_completion(
@@ -146,7 +146,18 @@ class AutonomousAgent:
                     "content": json.dumps(step_result, ensure_ascii=False),
                 })
 
-        fallback_reply = "مراحل اجرای دستور تکمیل شد. نتیجه در گزارش ثبت گردید."
+        # The model used all its steps without a final message. Never answer
+        # with a robotic line — report what the tools actually did, using the
+        # last tool result's own message (e.g. "فایل برای شما ارسال شد.").
+        fallback_reply = "کارها انجام شد ولی جواب نهایی آماده نشد؛ دوباره بگو چه کار کنم."
+        for m in reversed(messages):
+            if m.get("role") == "tool":
+                try:
+                    res = json.loads(m.get("content") or "{}")
+                    fallback_reply = res.get("message") or res.get("error") or fallback_reply
+                except Exception:
+                    pass
+                break
         await self.conv_memory.add_message(str(user_id), "assistant", fallback_reply, channel=channel)
         return {
             "status": "موفق",

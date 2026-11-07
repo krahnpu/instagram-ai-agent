@@ -278,6 +278,50 @@ class TelegramUserAccountConnector:
             ),
         }
 
+    async def list_telegram_dialogs(self, limit: int = 20) -> Dict[str, Any]:
+        """List the userbot's Telegram chats (users, groups, channels) so the
+        agent can find and read other people's messages — the capability the
+        owner asked for. Owner-only by RBAC."""
+        if not self.client or not self.is_connected:
+            return {"status": "error", "error": "حساب کاربری تلگرام (یوزربات) متصل نیست."}
+        try:
+            dialogs = await self.client.get_dialogs(limit=max(1, min(50, int(limit))))
+            out = []
+            for d in dialogs:
+                ent = d.entity
+                out.append({
+                    "id": d.id,
+                    "name": d.name or "",
+                    "username": getattr(ent, "username", None),
+                    "type": "group" if d.is_group else "channel" if d.is_channel else "user",
+                    "unread": d.unread_count,
+                })
+            return {"status": "ok", "dialogs": out}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+    async def read_telegram_messages(self, peer: str, limit: int = 10) -> Dict[str, Any]:
+        """Read recent messages from one Telegram chat via the userbot.
+        peer can be a @username, a numeric id, or a phone number."""
+        if not self.client or not self.is_connected:
+            return {"status": "error", "error": "حساب کاربری تلگرام (یوزربات) متصل نیست."}
+        try:
+            entity = await self.client.get_entity(peer)
+        except Exception as exc:
+            return {"status": "error", "error": f"مخاطب پیدا نشد: {exc}"}
+        try:
+            msgs = []
+            async for m in self.client.iter_messages(entity, limit=max(1, min(50, int(limit)))):
+                msgs.append({
+                    "id": m.id,
+                    "date": m.date.isoformat() if m.date else "",
+                    "sender_id": m.sender_id,
+                    "text": m.text or "",
+                })
+            return {"status": "ok", "peer": getattr(entity, "username", None) or str(peer), "messages": msgs}
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
     async def list_accessible_channels(self, limit: int = 25) -> Dict[str, Any]:
         """Discovers channels that the connected Telegram user account has access to."""
         if not self.client or not self.is_connected:

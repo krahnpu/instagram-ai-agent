@@ -85,7 +85,7 @@ class SelfExtenderManager:
         cmd = [sys.executable, "-m", "pip", "install", "--no-cache-dir", pip_spec]
 
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90, check=False)
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180, check=False)
             if proc.returncode != 0:
                 return {
                     "status": "ناموفق",
@@ -114,6 +114,69 @@ class SelfExtenderManager:
         except Exception as exc:
             logger.error(f"Package installation error for {pip_spec}: {exc}")
             return {"status": "ناموفق", "error": str(exc)}
+
+    def save_code_extension(
+        self, name: str, code: str, description: str = ""
+    ) -> Dict[str, Any]:
+        """Save a self-written extension module under extensions/<name>.py.
+
+        The module is compiled (syntax check) and recorded in
+        extensions/manifest.json. Loading/registration happens in the tool
+        registry (load_extensions), so a bad module can never crash the bot:
+        import errors are caught and reported there.
+        """
+        safe_name = re.sub(r"[^a-zA-Z0-9_]", "_", name.strip()).strip("_") or "extension"
+        ext_dir = Path("extensions")
+        ext_dir.mkdir(parents=True, exist_ok=True)
+        target = ext_dir / f"{safe_name}.py"
+        if target.exists():
+            backup = self.create_file_backup(target)
+            if not backup.get("ok"):
+                return {"status": "error", "error": backup.get("error", "backup failed")}
+        target.write_text(code, encoding="utf-8")
+        try:
+            import py_compile
+
+            py_compile.compile(str(target), doraise=True)
+        except Exception as exc:
+            return {"status": "error", "error": f"خطای سینتکس در کد: {exc}"}
+        manifest_path = ext_dir / "manifest.json"
+        manifest: List[Dict[str, Any]] = []
+        if manifest_path.exists():
+            try:
+                import json
+
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                manifest = []
+        manifest = [m for m in manifest if m.get("name") != safe_name]
+        manifest.append({
+            "name": safe_name,
+            "description": description,
+            "path": str(target),
+            "added_at": datetime.now().isoformat(),
+        })
+        manifest_path.write_text(
+            __import__("json").dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return {
+            "status": "ok",
+            "name": safe_name,
+            "path": str(target),
+            "message": "افزونه ذخیره شد. برای دائمی شدن باید به ریپو اضافه شود، چون دیپلوی بعدی هاست آن را پاک می‌کند.",
+        }
+
+    def list_code_extensions(self) -> List[Dict[str, Any]]:
+        manifest_path = Path("extensions") / "manifest.json"
+        if not manifest_path.exists():
+            return []
+        try:
+            import json
+
+            return json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
 
     def create_file_backup(self, target_file: Path) -> Dict[str, Any]:
         if not target_file.exists():

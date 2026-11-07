@@ -1,8 +1,41 @@
+import importlib
+import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 from config import settings
 from core.permissions import Role, PermissionManager
 from utils.helpers import get_vps_resource_snapshot, get_current_datetime
+from utils.logger import get_logger
+
+
+logger = get_logger("core.tools")
+
+
+def load_extensions(registry: "ToolRegistry") -> List[str]:
+    """Import every module in extensions/ and let it register its own tools
+    via register(registry). A broken module is logged and skipped — it can
+    never crash the bot. Called at startup (main.py) and after
+    save_code_extension so new tools go live immediately."""
+    ext_dir = Path("extensions")
+    loaded: List[str] = []
+    if not ext_dir.exists():
+        return loaded
+    if str(ext_dir.resolve()) not in sys.path:
+        sys.path.insert(0, str(ext_dir.resolve()))
+    for mod_path in sorted(ext_dir.glob("*.py")):
+        name = mod_path.stem
+        try:
+            module = importlib.import_module(name)
+            importlib.reload(module)
+            register = getattr(module, "register", None)
+            if callable(register):
+                register(registry)
+                loaded.append(name)
+            else:
+                logger.warning(f"Extension {name} has no register(registry); skipped.")
+        except Exception as exc:
+            logger.error(f"Extension {name} failed to load: {exc}")
+    return loaded
 
 
 class ToolRegistry:
@@ -43,12 +76,23 @@ class ToolRegistry:
         self.scheduler = scheduler
         self.self_extender = self_extender
         self.permissions = PermissionManager()
+        # Tools added at runtime by self-written extensions (see
+        # load_extensions). Schemas are exposed to the owner only.
+        self.extension_tools: Dict[str, Any] = {}
+        self.extension_schemas: List[Dict[str, Any]] = []
         # Aiogram Bot used to send files to the owner; wired in main.py after
         # TelegramBotManager is created (tool registry is built first).
         # NOTE: TelegramBotManager.bot is None until start() runs, so store the
         # manager itself and resolve .bot lazily at send time — wiring the
         # .bot attribute early silently stored None and every file send failed.
         self.file_sender_source: Any = None
+
+    def register_extension_tool(self, name: str, schema: Dict[str, Any], handler: Callable[..., Any]) -> None:
+        """Register one tool from a self-written extension module. The
+        handler may be sync or async and receives the tool arguments dict."""
+        self.extension_tools[name] = handler
+        self.extension_schemas = [s for s in self.extension_schemas if s["function"]["name"] != name]
+        self.extension_schemas.append(schema)
 
     def set_file_sender(self, source: Any) -> None:
         self.file_sender_source = source
@@ -547,10 +591,106 @@ class ToolRegistry:
                     },
                 },
             },
+            {
+                "type": "function",
+                "function": {
+                    "name": "approve_and_install_package",
+                    "description": "Install a previously proposed package AFTER the owner explicitly confirmed it in chat (they said install it / تایید). Pass the request_id from propose_package_installation and confirmed_by_owner=true. Runs pip install and verifies the import. Never call this without the owner's explicit confirmation for that exact package.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "request_id": {"type": "string", "description": "Request id returned by propose_package_installation"},
+                            "confirmed_by_owner": {"type": "boolean", "description": "Must be true — only set it after the owner confirmed this exact install in chat."},
+                        },
+                        "required": ["request_id", "confirmed_by_owner"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_pending_package_requests",
+                    "description": "List package-install proposals waiting for the owner's confirmation.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "save_code_extension",
+                    "description": "Save a self-written extension module (Python code you wrote to add a missing capability) under extensions/<name>.py, after the owner approved adding it. The code is syntax-checked; a broken module is rejected. After saving, it is loaded live and its tools become available. Tell the owner the extension lives only until the next redeploy unless it is added to the repo.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Short snake_case module name, e.g. telegram_dialogs"},
+                            "code": {"type": "string", "description": "Full Python source of the module. It must define register(registry) and call registry.register_extension_tool for each new tool."},
+                            "description": {"type": "string", "description": "What the extension adds and why"},
+                        },
+                        "required": ["name", "code"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_code_extensions",
+                    "description": "List self-written extension modules currently saved.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_telegram_dialogs",
+                    "description": "List the userbot's Telegram chats (users, groups, channels) with unread counts, so you can find a conversation and read its messages. Use this when the owner asks to read someone's Telegram messages via the user account.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "description": "How many chats to list (default 20, max 50)."},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_telegram_messages",
+                    "description": "Read recent messages from one Telegram chat via the connected user account (userbot). Give a @username, numeric id or phone number as peer. Use this when the owner asks what someone said on Telegram.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "peer": {"type": "string", "description": "@username, numeric id or phone number of the chat"},
+                            "limit": {"type": "integer", "description": "How many recent messages to read (default 10, max 50)."},
+                        },
+                        "required": ["peer"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "run_self_check",
+                    "description": "Check the agent's own health right now: Instagram session file present, Telegram user account connected, disk and memory usage. Returns a short report and a list of problems found.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_recent_logs",
+                    "description": "Read the last lines of the agent's own log file to diagnose a problem (failed tool, failed login, crash). Use this when something is not working and you need to find out why before telling the owner.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "lines": {"type": "integer", "description": "How many recent lines to read (default 50, max 200)."},
+                        },
+                    },
+                },
+            },
         ]
 
         if role == Role.OWNER:
-            return all_tools
+            return all_tools + self.extension_schemas
 
         return [
             t for t in all_tools
@@ -665,5 +805,86 @@ class ToolRegistry:
                 version_spec=args.get("version_spec", "latest"),
                 reason=args.get("reason", ""),
             )
+        if name == "approve_and_install_package" and self.self_extender:
+            return self.self_extender.approve_and_install_package(
+                request_id=str(args.get("request_id", "")),
+                confirmed_by_owner=bool(args.get("confirmed_by_owner", False)),
+            )
+        if name == "list_pending_package_requests" and self.self_extender:
+            return {"status": "ok", "requests": self.self_extender.list_pending_requests()}
+        if name == "save_code_extension" and self.self_extender:
+            result = self.self_extender.save_code_extension(
+                name=str(args.get("name", "")),
+                code=str(args.get("code", "")),
+                description=str(args.get("description", "")),
+            )
+            if result.get("status") == "ok":
+                loaded = load_extensions(self)
+                result["loaded_now"] = loaded
+                # Send the extension file to the owner so it can be added to
+                # the repo — otherwise the next redeploy wipes it.
+                await self._send_file_to_owner(
+                    file_path=result.get("path", ""),
+                    caption=f"افزونه {result.get('name', '')} — برای ماندگار شدن به ریپو اضافه‌اش کن.",
+                )
+            return result
+        if name == "list_code_extensions" and self.self_extender:
+            return {"status": "ok", "extensions": self.self_extender.list_code_extensions()}
+        if name == "list_telegram_dialogs" and self.user_connector:
+            return await self.user_connector.list_telegram_dialogs(limit=int(args.get("limit", 20)))
+        if name == "read_telegram_messages" and self.user_connector:
+            return await self.user_connector.read_telegram_messages(
+                peer=str(args.get("peer", "")), limit=int(args.get("limit", 10))
+            )
+        if name == "run_self_check":
+            return await self._run_self_check()
+        if name == "read_recent_logs":
+            return self._read_recent_logs(lines=int(args.get("lines", 50)))
+
+        if name in self.extension_tools:
+            handler = self.extension_tools[name]
+            try:
+                result = handler(args)
+                if hasattr(result, "__await__"):
+                    result = await result
+                return result if isinstance(result, dict) else {"status": "ok", "result": result}
+            except Exception as exc:
+                return {"status": "error", "error": str(exc)}
 
         return {"status": "unsupported", "error": f"Tool '{name}' is not registered."}
+
+    async def _run_self_check(self) -> Dict[str, Any]:
+        """Health check used by the owner on demand and by the background
+        self-check job: IG session file, Telethon connection, resources."""
+        problems: List[str] = []
+        ig_path = Path(str(settings.IG_SESSION_PATH))
+        ig_ok = ig_path.exists() and ig_path.stat().st_size > 0
+        if not ig_ok:
+            problems.append("فایل سشن اینستاگرام پیدا نشد؛ اینستاگرام وصل نیست.")
+        tg_ok = False
+        if self.user_connector is not None:
+            try:
+                tg_ok = bool(getattr(self.user_connector, "is_connected", False))
+            except Exception:
+                tg_ok = False
+        if not tg_ok:
+            problems.append("حساب کاربری تلگرام (یوزربات) متصل نیست.")
+        resources = get_vps_resource_snapshot()
+        return {
+            "status": "ok" if not problems else "problems_found",
+            "instagram_session_ok": ig_ok,
+            "telegram_user_connected": tg_ok,
+            "problems": problems,
+            "resources": resources,
+        }
+
+    def _read_recent_logs(self, lines: int = 50) -> Dict[str, Any]:
+        log_path = Path(str(settings.LOG_FILE_PATH))
+        if not log_path.exists():
+            return {"status": "error", "error": "فایل لاگ پیدا نشد."}
+        try:
+            all_lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+        tail = all_lines[-max(1, min(200, int(lines))):]
+        return {"status": "ok", "lines": tail}

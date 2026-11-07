@@ -60,6 +60,14 @@ class PermissionManager:
         "import_instagram_session",
         "test_instagram_connection",
         "propose_package_installation",
+        "approve_and_install_package",
+        "list_pending_package_requests",
+        "save_code_extension",
+        "list_code_extensions",
+        "list_telegram_dialogs",
+        "read_telegram_messages",
+        "run_self_check",
+        "read_recent_logs",
     }
 
     def get_user_role(self, user_id: int) -> Role:
