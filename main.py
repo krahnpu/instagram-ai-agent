@@ -153,7 +153,9 @@ class ApplicationOrchestrator:
         self.user_connector.on_connected = _send_telethon_session_backup
 
         # Let the agent send files to the owner as real Telegram documents.
-        self.tool_registry.set_file_sender(self.tg_bot.bot)
+        # Pass the manager (not .bot): .bot is None until start() runs, and
+        # the tools resolve it lazily at send time.
+        self.tool_registry.set_file_sender(self.tg_bot)
 
     async def start(self) -> None:
         setup_logger()

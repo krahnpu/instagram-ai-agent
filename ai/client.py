@@ -50,8 +50,15 @@ class AIClient:
                 choice = data["choices"][0]["message"]
                 return {"status": "ok", "message": choice, "usage": data.get("usage", {})}
         except httpx.HTTPStatusError as exc:
-            logger.error(f"AI HTTP error {exc.response.status_code}: {exc.response.text[:250]}")
-            return {"error": f"HTTP {exc.response.status_code}: {exc.response.text[:200]}"}
+            body = exc.response.text or ""
+            logger.error(f"AI HTTP error {exc.response.status_code}: {body[:250]}")
+            # The model provider refuses some topics (e.g. conflict/military
+            # news) with a content filter. Surface that as a typed error so
+            # the agent can answer briefly in Persian instead of dumping the
+            # raw provider JSON to the user — and never fabricate an answer.
+            if "content_filter" in body:
+                return {"error": "content_filter"}
+            return {"error": f"HTTP {exc.response.status_code}: {body[:200]}"}
         except Exception as exc:
             logger.error(f"AI connection error: {exc}")
             return {"error": str(exc)}

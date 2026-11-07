@@ -83,6 +83,12 @@ class AutonomousAgent:
 
             if "error" in ai_response:
                 logger.error(f"AI API failure at step {step_idx}: {ai_response['error']}")
+                if ai_response["error"] == "content_filter":
+                    return {
+                        "status": "ناموفق",
+                        "reply": "این موضوع را نمی‌توانم بررسی کنم، چون مدل به‌خاطر فیلتر محتوا جواب نمی‌دهد. سوالت را جور دیگری بپرس.",
+                        "trace": execution_trace,
+                    }
                 return {
                     "status": "ناموفق",
                     "reply": f"⚠️ خطا در ارتباط با سرویس هوش مصنوعی: {ai_response['error']}",

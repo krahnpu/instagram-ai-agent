@@ -45,10 +45,19 @@ class ToolRegistry:
         self.permissions = PermissionManager()
         # Aiogram Bot used to send files to the owner; wired in main.py after
         # TelegramBotManager is created (tool registry is built first).
-        self.file_sender_bot: Any = None
+        # NOTE: TelegramBotManager.bot is None until start() runs, so store the
+        # manager itself and resolve .bot lazily at send time — wiring the
+        # .bot attribute early silently stored None and every file send failed.
+        self.file_sender_source: Any = None
 
-    def set_file_sender(self, bot: Any) -> None:
-        self.file_sender_bot = bot
+    def set_file_sender(self, source: Any) -> None:
+        self.file_sender_source = source
+
+    def _resolve_file_sender_bot(self) -> Any:
+        source = self.file_sender_source
+        if source is None:
+            return None
+        return getattr(source, "bot", source)
 
     async def _send_file_to_owner(
         self,
@@ -61,7 +70,8 @@ class ToolRegistry:
         file from text content (filename + content) or sends an existing
         server file (file_path). The filename is sanitised to a bare name so
         no path traversal is possible; content is capped at 5 MB."""
-        if self.file_sender_bot is None:
+        file_sender_bot = self._resolve_file_sender_bot()
+        if file_sender_bot is None:
             return {"status": "error", "error": "ارسال فایل در دسترس نیست."}
         try:
             if file_path:
@@ -80,7 +90,7 @@ class ToolRegistry:
                 path.write_text(content, encoding="utf-8")
             from aiogram.types import FSInputFile
 
-            await self.file_sender_bot.send_document(
+            await file_sender_bot.send_document(
                 settings.TELEGRAM_OWNER_ID,
                 FSInputFile(str(path)),
                 caption=caption or None,

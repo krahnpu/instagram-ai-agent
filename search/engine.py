@@ -1,4 +1,5 @@
 import asyncio
+import re
 from datetime import datetime
 from typing import Any, Dict, List
 from urllib.parse import quote_plus
@@ -11,6 +12,34 @@ from search.sources import SourceVerifier
 
 
 logger = get_logger("search.engine")
+
+
+def _normalize_persian(text: str) -> str:
+    """Unify Arabic/Persian letter variants so «امریکا» matches «آمریکا»."""
+    return (
+        text.replace("آ", "ا").replace("أ", "ا").replace("إ", "ا")
+        .replace("ة", "ه").replace("ؤ", "و").replace("ي", "ی").replace("ك", "ک")
+        .replace("ـ", "")
+    )
+
+
+def _query_tokens(query: str) -> List[str]:
+    """Meaningful word tokens of a query (Persian/Arabic or Latin), used to
+    check whether a search result is actually about the question."""
+    tokens = re.findall(r"[\u0600-\u06FFa-zA-Z0-9]{2,}", _normalize_persian(query))
+    return [t for t in tokens if len(t) >= 3 or (t.isascii() and len(t) >= 2)]
+
+
+def _result_is_relevant(result: Dict[str, str], query_tokens: List[str]) -> bool:
+    text = _normalize_persian(f"{result.get('title', '')} {result.get('snippet', '')}").lower()
+    return any(tok.lower() in text for tok in query_tokens)
+
+
+def clean_search_query(query: str) -> str:
+    """Turn a natural-language question into a search phrase: drop trailing
+    question marks and collapse whitespace."""
+    q = query.strip().rstrip("؟?").strip()
+    return re.sub(r"\s+", " ", q)
 
 
 class WebSearchEngine:
@@ -30,7 +59,7 @@ class WebSearchEngine:
         self.current_year = datetime.now().year
 
     async def search_and_extract(self, query: str) -> Dict[str, Any]:
-        clean_query = query.strip()
+        clean_query = clean_search_query(query)
         if not clean_query:
             return {"status": "error", "error": "عبارت جست‌وجو خالی است."}
 
@@ -57,11 +86,18 @@ class WebSearchEngine:
                 raw_results = gh_results + raw_results
             except Exception as exc:
                 logger.warning(f"GitHub releases search failed: {exc}")
+        # Relevance gate (also applied to Bing results below): search engines
+        # sometimes return junk unrelated to the question (e.g. "Montreal
+        # Canadiens" for a Persian news query). Drop results sharing no word
+        # with the query instead of letting the agent answer from them — no
+        # relevant source is better than a wrong one.
+        raw_results = self._relevant_results(raw_results, clean_query)
         if not raw_results:
-            # DuckDuckGo often returns nothing from datacenter IPs — fall back
-            # to Bing so a search question still gets an answer.
+            # DuckDuckGo often returns nothing (or only junk) from datacenter
+            # IPs — fall back to Bing so a search question still gets an answer.
             try:
-                raw_results = await self._search_bing(clean_query, max_results=settings.SEARCH_MAX_RESULTS)
+                bing_results = await self._search_bing(clean_query, max_results=settings.SEARCH_MAX_RESULTS)
+                raw_results = self._relevant_results(bing_results, clean_query)
             except Exception as exc:
                 logger.warning(f"Bing fallback search failed: {exc}")
                 raw_results = []
@@ -127,6 +163,16 @@ class WebSearchEngine:
             ),
             "sources": verified_sources,
         }
+
+    def _relevant_results(self, results: List[Dict[str, str]], query: str) -> List[Dict[str, str]]:
+        query_tokens = _query_tokens(query)
+        if not query_tokens:
+            return results
+        relevant = [r for r in results if _result_is_relevant(r, query_tokens)]
+        if relevant:
+            return relevant
+        logger.warning(f"Search results for '{query}' were all irrelevant; treating as no results.")
+        return []
 
     async def _search_duckduckgo(self, query: str, max_results: int = 6) -> List[Dict[str, str]]:
         url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
