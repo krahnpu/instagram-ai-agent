@@ -756,9 +756,43 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
             norm_text = text.translate(_fa_digits)
             clean_phone = re.sub(r"[\s\-]", "", norm_text)
 
+            # (a0) A Telethon login is already in progress: a digits-only message
+            # is the login CODE (while _pending_phone is set) or the 2FA PASSWORD
+            # (while _awaiting_2fa is set) — never a new phone number. This is
+            # what broke the 2FA step: "30556699" was misread as a phone number
+            # and sent to send_code_request, which rejected it as invalid.
+            if manager.user_connector:
+                if getattr(manager.user_connector, "_awaiting_2fa", False):
+                    res = await manager.user_connector.submit_two_factor_password(text)
+                    if res["status"] == "connected":
+                        await message.answer(f"✅ {res['message']}")
+                    else:
+                        await message.answer(f"❌ {res.get('error')}")
+                    return
+                if getattr(manager.user_connector, "_pending_phone", None):
+                    digits_only = re.sub(r"[\s\-]", "", norm_text)
+                    if re.fullmatch(r"\d{5,6}", digits_only):
+                        res = await manager.user_connector.submit_verification_code(text)
+                        if res["status"] == "connected":
+                            await message.answer(f"✅ {res['message']}\nحساب: <code>@{res.get('username')}</code>")
+                        elif res["status"] == "two_factor_required":
+                            await message.answer(
+                                "🔐 <b>تأیید دومرحله‌ای (Two-Step Verification) روی این حساب فعال است.</b>\n"
+                                "لطفاً رمز عبور دومرحله‌ای را ارسال کنید:"
+                            )
+                        else:
+                            await message.answer(f"❌ {res.get('error')}")
+                        return
+                    if digits_only.isdigit():
+                        await message.answer(
+                            "⚠️ کد تأیید تلگرام ۵ رقمی است. لطفاً کد ۵ رقمی‌ای که تلگرام فرستاد را ارسال کنید:"
+                        )
+                        return
+
             # (a) Phone number -> Telethon login. Use saved/env TG_API_ID &
             # TG_API_HASH when present, so the owner only sends the phone.
-            if re.fullmatch(r"\+?\d{8,15}", clean_phone):
+            # Minimum 10 digits: shorter numbers are login codes / 2FA passwords.
+            if re.fullmatch(r"\+?\d{10,15}", clean_phone):
                 if manager.user_connector:
                     creds = await manager.user_connector.get_saved_credentials()
                     if creds.get("api_id") and creds.get("api_hash"):

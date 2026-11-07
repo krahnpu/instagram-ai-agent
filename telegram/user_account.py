@@ -31,6 +31,10 @@ class TelegramUserAccountConnector:
         self.is_connected: bool = False
         self._pending_phone: Optional[str] = None
         self._pending_phone_code_hash: Optional[str] = None
+        # True after submit_verification_code reports two_factor_required:
+        # the next digits-only message from the owner is the 2FA password,
+        # NOT a new phone number or login code.
+        self._awaiting_2fa: bool = False
 
     async def start(self) -> None:
         creds = await self.get_saved_credentials()
@@ -62,6 +66,7 @@ class TelegramUserAccountConnector:
 
     async def begin_interactive_login(self, api_id: int, api_hash: str, phone: str) -> Dict[str, Any]:
         """Step 1-3: Save API_ID/API_HASH, connect Telethon client, and request SMS/Telegram code."""
+        self._awaiting_2fa = False
         await self.lt_memory.set_preference("tg_user_api_id", str(api_id))
         enc_hash = self.protector.encrypt_if_enabled(api_hash.strip()).decode("utf-8")
         await self.lt_memory.set_preference("tg_user_api_hash", enc_hash)
@@ -103,6 +108,7 @@ class TelegramUserAccountConnector:
                 phone_code_hash=self._pending_phone_code_hash,
             )
             self.is_connected = True
+            self._awaiting_2fa = False
             me = await self.client.get_me()
             return {
                 "status": "connected",
@@ -110,6 +116,7 @@ class TelegramUserAccountConnector:
                 "message": "اتصال حساب کاربری تلگرام با موفقیت انجام و Session به صورت پایدار ذخیره شد.",
             }
         except SessionPasswordNeededError:
+            self._awaiting_2fa = True
             return {
                 "status": "two_factor_required",
                 "message": "تأیید دومرحله‌ای (Two-Step Verification) روی این حساب فعال است. لطفاً رمز عبور دومرحله‌ای را ارسال کنید.",
@@ -126,6 +133,7 @@ class TelegramUserAccountConnector:
         try:
             await self.client.sign_in(password=password)
             self.is_connected = True
+            self._awaiting_2fa = False
             me = await self.client.get_me()
             return {
                 "status": "connected",
