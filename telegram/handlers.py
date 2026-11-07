@@ -814,14 +814,29 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
 
             # (a-3) Message me via the connected Telegram USER account (userbot),
             # not via this bot. The bot must never claim a bot-sent message came
-            # from the user account.
+            # from the user account — and must send the user's OWN words, not a
+            # hardcoded test text: "بگو سلام خوبی" means the message IS "سلام خوبی".
             if any(k in norm_text for k in ("یوزربات", "یوزر اکانت", "اکانت تلگرام", "اون اکانت", "با اون", "به اون", "اکانت وصل")) and any(
                 k in norm_text for k in ("پیام بده", "پیام بفرست", "پیام بده بهم", "بهم پیام بده")
             ):
+                # Extract the exact text the user asked to send.
+                custom_text = None
+                m_say = re.search(r"بگو\s+(.+)$", norm_text)
+                if m_say:
+                    custom_text = m_say.group(1).strip().strip("\"'«»").strip()
+                if not custom_text:
+                    m_q = re.search(r"[\"«]([^\"»]+)[\"»]", norm_text)
+                    if m_q:
+                        custom_text = m_q.group(1).strip()
+                if not custom_text:
+                    m_col = re.search(r"پیام بده\s*:\s*(.+)$", norm_text)
+                    if m_col:
+                        custom_text = m_col.group(1).strip()
+                send_text = custom_text or "سلام! 👋 این پیام از طریق اکانت تلگرام متصل شما (یوزربات) ارسال شد — اتصال برقرار است. ✅"
                 if manager.user_connector and manager.user_connector.is_connected:
                     owner_username = message.from_user.username if message.from_user else None
                     res = await manager.user_connector.send_message_to_owner(
-                        "سلام! 👋 این پیام از طریق اکانت تلگرام متصل شما (یوزربات) ارسال شد — اتصال برقرار است. ✅",
+                        send_text,
                         username=owner_username,
                     )
                     if res.get("status") == "ok":

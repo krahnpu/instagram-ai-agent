@@ -49,14 +49,14 @@ class ApplicationOrchestrator:
             session_path=Path(settings.IG_SESSION_PATH),
             lt_memory=self.lt_memory,
         )
-        self.ig_publisher = InstagramPublisher(self.ig_client, self.lt_memory)
+        self.media_processor = MediaProcessor(Path(settings.TEMP_MEDIA_DIR))
+        self.ig_publisher = InstagramPublisher(self.ig_client, self.lt_memory, self.media_processor)
         self.ig_stories = InstagramStoryManager(self.ig_client, self.lt_memory)
         self.ig_direct = InstagramDirectManager(self.ig_client, self.conv_memory, self.lt_memory)
         self.ig_comments = InstagramCommentManager(self.ig_client, self.lt_memory)
         self.ig_interactions = InstagramInteractionManager(self.ig_client, self.lt_memory)
         self.ig_analytics = InstagramAnalytics(self.ig_client, self.lt_memory)
         self.ig_music = InstagramMusicManager(self.ig_client)
-        self.media_processor = MediaProcessor(Path(settings.TEMP_MEDIA_DIR))
         self.duplicate_detector = DuplicateDetector(self.db)
         self.ig_content_manager = InstagramContentManager(
             self.ig_client,

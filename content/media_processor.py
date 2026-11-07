@@ -20,10 +20,21 @@ class MediaProcessor:
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.max_storage_bytes = settings.MAX_TEMP_STORAGE_MB * 1024 * 1024
 
+    def _ffmpeg_exe(self) -> str:
+        # Static ffmpeg binary bundled with the pip package imageio-ffmpeg —
+        # works on servers (e.g. Render free) where no system ffmpeg exists
+        # and apt installs are impossible. Falls back to system ffmpeg.
+        try:
+            import imageio_ffmpeg
+
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return "ffmpeg"
+
     def extract_video_keyframe(self, video_path: Path) -> Optional[Path]:
         output_frame = self.temp_dir / f"{video_path.stem}_frame.jpg"
         cmd = [
-            "ffmpeg",
+            self._ffmpeg_exe(),
             "-y",
             "-ss",
             "00:00:01",

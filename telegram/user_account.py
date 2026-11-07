@@ -318,13 +318,27 @@ class TelegramUserAccountConnector:
                     target_file = Path(settings.TEMP_MEDIA_DIR) / f"{clean_channel}_{msg.id}{ext}"
                     downloaded = await msg.download_media(file=str(target_file))
                     if downloaded:
-                        items.append({
+                        item: Dict[str, Any] = {
                             "message_id": msg.id,
                             "channel": clean_channel,
                             "media_type": "video" if msg.video else "photo",
                             "file_path": str(downloaded),
                             "original_caption": msg.text or "",
-                        })
+                        }
+                        # Telegram already has a cover frame for the video —
+                        # use it as the Instagram thumbnail so no MoviePy /
+                        # ffmpeg is needed at all on the server.
+                        if msg.video:
+                            thumbs = getattr(msg.video, "thumbs", None) or []
+                            if thumbs:
+                                thumb_file = Path(settings.TEMP_MEDIA_DIR) / f"{clean_channel}_{msg.id}_thumb.jpg"
+                                try:
+                                    await self.client.download_media(thumbs[-1], file=str(thumb_file))
+                                    if thumb_file.exists():
+                                        item["thumbnail_path"] = str(thumb_file)
+                                except Exception as exc:
+                                    logger.debug(f"Telegram thumb download skipped for {msg.id}: {exc}")
+                        items.append(item)
             return {"status": "ok", "channel": clean_channel, "media_items": items}
         except Exception as exc:
             logger.error(f"Failed fetching media from channel {clean_channel}: {exc}")

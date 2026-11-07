@@ -147,12 +147,13 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": "publish_instagram_reel",
-                    "description": "Publish a video Reel to Instagram via Instagrapi clip_upload.",
+                    "description": "Publish a video Reel to Instagram via Instagrapi clip_upload. ALWAYS pass the thumbnail when you have one (e.g. thumbnail_path returned by fetch_telegram_channel_media) — without it the upload needs MoviePy/ffmpeg on the server. The publisher also extracts a keyframe itself when no thumbnail is given.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "video_path": {"type": "string", "description": "Local file path to MP4 video"},
                             "caption": {"type": "string", "description": "Reel caption and hashtags"},
+                            "thumbnail": {"type": "string", "description": "Optional local path to a JPG cover image (e.g. the Telegram video thumb). Pass it whenever fetch_telegram_channel_media returned a thumbnail_path."},
                         },
                         "required": ["video_path", "caption"],
                     },
@@ -235,7 +236,7 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": "fetch_telegram_channel_media",
-                    "description": "Fetch latest video or photo from a configured Telegram channel via Telethon.",
+                    "description": "Fetch latest video or photo from a configured Telegram channel via Telethon. For videos it also downloads Telegram's own thumbnail and returns it as thumbnail_path — pass that to publish_instagram_reel so no MoviePy/ffmpeg is needed.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -401,7 +402,7 @@ class ToolRegistry:
                 "type": "function",
                 "function": {
                     "name": "send_message_via_user_account",
-                    "description": "Send a message FROM the connected Telegram user account (userbot, the owner's own account) TO the owner as a real DM. ALWAYS pass the owner's @username (e.g. Dev_kral) when you know it — without it the message may only reach Saved Messages. If the user account is not connected, report that instead of sending via the bot. The result tells you exactly where the message went (sent_via); report that destination honestly.",
+                    "description": "Send a message FROM the connected Telegram user account (userbot, the owner's own account) TO the owner as a real DM. Use the user's EXACT words verbatim as the message — never substitute your own generic test text. ALWAYS pass the owner's @username (e.g. Dev_kral) when you know it — without it the message may only reach Saved Messages. If the user account is not connected, report that instead of sending via the bot. The result tells you exactly where the message went (sent_via); report that destination honestly.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -468,7 +469,9 @@ class ToolRegistry:
         if name == "publish_instagram_photo":
             return await self.ig_publisher.publish_photo(args["photo_path"], args.get("caption", ""))
         if name == "publish_instagram_reel":
-            return await self.ig_publisher.publish_reel(args["video_path"], args.get("caption", ""))
+            return await self.ig_publisher.publish_reel(
+                args["video_path"], args.get("caption", ""), thumbnail=args.get("thumbnail")
+            )
         if name == "publish_instagram_story":
             return await self.ig_stories.publish_story(args["media_path"], args.get("caption", ""))
         if name == "get_recent_direct_messages":
