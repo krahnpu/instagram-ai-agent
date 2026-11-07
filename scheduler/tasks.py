@@ -91,6 +91,13 @@ class ScheduledTaskRunner:
                     if await self._is_event_processed(event_key):
                         continue
 
+                    # NEVER reply to our own last message: the previous run's
+                    # reply becomes the thread's last message, and replying to
+                    # it again would spam the same thread every interval.
+                    if not thread.get("last_message_is_incoming", True):
+                        await self._mark_event_processed(event_key, task_id)
+                        continue
+
                     if thread.get("classification") == "اسپم / تبلیغاتی":
                         await self._mark_event_processed(event_key, task_id)
                         continue

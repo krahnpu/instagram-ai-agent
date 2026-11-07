@@ -783,6 +783,59 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
             norm_text = text.translate(_fa_digits)
             clean_phone = re.sub(r"[\s\-]", "", norm_text)
 
+            # (a-2) Delete / pause a scheduled task by chat ("اون تسک ۵ ثانیه‌ای رو حذف کن").
+            if "تسک" in norm_text and ("حذف" in norm_text or "متوقف" in norm_text or "پاک" in norm_text):
+                m_id = re.search(r"tsk_[a-z0-9]+", norm_text)
+                target_id = m_id.group(0) if m_id else None
+                if not target_id and manager.scheduler:
+                    tasks = await manager.scheduler.list_dynamic_tasks()
+                    active = [t for t in tasks if t.get("enabled") and t.get("approved_by_owner")]
+                    dm_tasks = [t for t in active if t.get("task_type") == "auto_reply_directs"]
+                    if len(dm_tasks) == 1:
+                        target_id = dm_tasks[0]["task_id"]
+                if target_id:
+                    if "متوقف" in norm_text:
+                        res = await manager.scheduler.pause_task(target_id)
+                        await message.answer(f"⏸ تسک <code>{target_id}</code> متوقف شد.")
+                    else:
+                        await manager.scheduler.delete_task(target_id)
+                        await message.answer(f"🗑 تسک <code>{target_id}</code> حذف شد و دیگر اجرا نمی‌شود.")
+                else:
+                    tasks = await manager.scheduler.list_dynamic_tasks() if manager.scheduler else []
+                    lines = ["⏰ <b>تسک‌های فعال:</b>"] + [
+                        f"• <code>{t['task_id']}</code> — {t['title']}"
+                        for t in tasks if t.get("enabled")
+                    ] or ["هیچ تسک فعالی نیست."]
+                    await message.answer(
+                        "\n".join(lines)
+                        + "\n\nکدام تسک حذف شود؟ شناسه‌اش (مثلاً <code>tsk_a6ed388f</code>) را بفرستید."
+                    )
+                return
+
+            # (a-3) Message me via the connected Telegram USER account (userbot),
+            # not via this bot. The bot must never claim a bot-sent message came
+            # from the user account.
+            if any(k in norm_text for k in ("یوزربات", "یوزر اکانت", "اکانت تلگرام", "اون اکانت", "با اون", "به اون", "اکانت وصل")) and any(
+                k in norm_text for k in ("پیام بده", "پیام بفرست", "پیام بده بهم", "بهم پیام بده")
+            ):
+                if manager.user_connector and manager.user_connector.is_connected:
+                    res = await manager.user_connector.send_message_to_owner(
+                        "سلام! 👋 این پیام از طریق اکانت تلگرام متصل شما (یوزربات) ارسال شد — اتصال برقرار است. ✅"
+                    )
+                    if res.get("status") == "ok":
+                        await message.answer(
+                            "✅ پیام آزمایشی از طریق <b>اکانت تلگرام متصل (یوزربات)</b> برای شما ارسال شد. "
+                            "اگر آن را دریافت کردید، یعنی اتصال یوزربات برقرار است."
+                        )
+                    else:
+                        await message.answer(f"❌ خطا در ارسال پیام از طریق یوزربات: {res.get('error')}")
+                else:
+                    await message.answer(
+                        "⚠️ حساب کاربری تلگرام (یوزربات) هنوز متصل نیست. "
+                        "اول با ارسال شماره تلفن لاگین کنید، بعد این تست را انجام می‌دهم."
+                    )
+                return
+
             # (a0) A Telethon login is already in progress: a digits-only message
             # is the login CODE (while _pending_phone is set) or the 2FA PASSWORD
             # (while _awaiting_2fa is set) — never a new phone number. This is

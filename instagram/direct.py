@@ -41,6 +41,14 @@ class InstagramDirectManager:
             last_msg = messages[0] if messages else None
             msg_text = getattr(last_msg, "text", "") if last_msg else ""
             users = [u.username for u in getattr(t, "users", [])]
+            # Instagrapi thread.users are the OTHER participants (not self), so
+            # a last message whose sender id is one of them is incoming. A last
+            # message from anyone else is our own (or the bot's) message and
+            # must NEVER be auto-replied to — otherwise the bot replies to its
+            # own replies in an endless loop every interval.
+            last_user_id = getattr(last_msg, "user_id", None) if last_msg else None
+            other_ids = {str(getattr(u, "pk", "")) for u in getattr(t, "users", [])}
+            is_incoming = bool(last_user_id is not None and str(last_user_id) in other_ids)
 
             classification = self.classify_message(msg_text or "")
             formatted_threads.append({
@@ -48,6 +56,7 @@ class InstagramDirectManager:
                 "users": users,
                 "last_message_id": str(getattr(last_msg, "id", "")) if last_msg else "",
                 "last_message_text": msg_text or "[رسانه / بدون متن]",
+                "last_message_is_incoming": is_incoming,
                 "classification": classification,
                 "needs_admin_escalation": classification == "نیازمند ارجاع به ادمین",
             })

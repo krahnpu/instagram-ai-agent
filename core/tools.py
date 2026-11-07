@@ -356,6 +356,62 @@ class ToolRegistry:
             {
                 "type": "function",
                 "function": {
+                    "name": "delete_scheduled_task",
+                    "description": "Permanently delete a scheduled task by its ID (e.g. tsk_a6ed388f). Use this when the owner asks to delete/remove a task. Never create a new task to delete one.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"task_id": {"type": "string", "description": "Task ID, e.g. tsk_a6ed388f"}},
+                        "required": ["task_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "pause_scheduled_task",
+                    "description": "Pause (stop) a scheduled task by its ID without deleting it.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"task_id": {"type": "string", "description": "Task ID, e.g. tsk_a6ed388f"}},
+                        "required": ["task_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "resume_scheduled_task",
+                    "description": "Resume a paused scheduled task by its ID.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"task_id": {"type": "string", "description": "Task ID, e.g. tsk_a6ed388f"}},
+                        "required": ["task_id"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "list_scheduled_tasks",
+                    "description": "List all scheduled tasks with their IDs, titles, intervals and states.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_message_via_user_account",
+                    "description": "Send a message FROM the connected Telegram user account (userbot, the owner's own account) TO the owner. Use this ONLY when the owner explicitly asks for a message via the user account / userbot, not the bot. If the user account is not connected, report that instead of sending via the bot.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "description": "Message text to send from the user account"}},
+                        "required": ["message"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "propose_package_installation",
                     "description": "Propose installing a required Python package in the virtualenv, awaiting Owner confirmation.",
                     "parameters": {
@@ -421,6 +477,16 @@ class ToolRegistry:
         if name == "save_admin_preference":
             await self.lt_memory.set_preference(args["key"], args["value"])
             return {"status": "ok", "key": args["key"], "value": args["value"]}
+        if name == "delete_scheduled_task" and self.scheduler:
+            return await self.scheduler.delete_task(str(args.get("task_id", "")))
+        if name == "pause_scheduled_task" and self.scheduler:
+            return await self.scheduler.pause_task(str(args.get("task_id", "")))
+        if name == "resume_scheduled_task" and self.scheduler:
+            return await self.scheduler.resume_task(str(args.get("task_id", "")))
+        if name == "list_scheduled_tasks" and self.scheduler:
+            return {"status": "ok", "tasks": await self.scheduler.list_dynamic_tasks()}
+        if name == "send_message_via_user_account" and self.user_connector:
+            return await self.user_connector.send_message_to_owner(str(args.get("message", "")))
         if name == "create_scheduled_task" and self.scheduler:
             # Owner-only tool: owner's own tasks are auto-approved and mounted
             # immediately instead of waiting for an inline approval tap.
