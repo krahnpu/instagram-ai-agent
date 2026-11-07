@@ -188,20 +188,54 @@ class TelegramUserAccountConnector:
         except Exception as exc:
             return {"status": "error", "error": f"خطا در بررسی رمز دومرحله‌ای: {exc}"}
 
-    async def send_message_to_owner(self, text: str) -> Dict[str, Any]:
+    async def send_message_to_owner(self, text: str, username: Optional[str] = None) -> Dict[str, Any]:
         """
         Send a message FROM the connected Telegram user account (userbot) TO
-        the owner. This is different from the bot sending a message: the
-        sender here is the user's own account, not the bot.
+        the owner. Telethon cannot send to a bare numeric user id that is not
+        in the session's entity cache ("PeerUser(...) not found") — so resolve
+        the recipient properly instead of passing the raw id:
+        1. by @username (API username lookup, works even if never cached),
+        2. 'me' (the account's own Saved Messages — always resolvable),
+        3. the raw numeric id (only works if already cached).
+        Also reports which account the session is actually logged into, so an
+        account mismatch (session on another account) is visible instead of
+        a confusing "not found".
         """
         if not self.client or not self.is_connected:
             return {"status": "not_connected", "error": "حساب کاربری تلگرام (یوزربات) متصل نیست. ابتدا لاگین کنید."}
         try:
-            await self.client.send_message(int(settings.TELEGRAM_OWNER_ID), text)
-            return {"status": "ok", "message": "پیام از طریق اکانت تلگرام متصل (یوزربات) ارسال شد."}
-        except Exception as exc:
-            logger.error(f"Failed to send message via user account: {exc}")
-            return {"status": "error", "error": str(exc)}
+            me = await self.client.get_me()
+            connected_as = f"@{getattr(me, 'username', '')}" if getattr(me, "username", "") else str(getattr(me, "id", ""))
+        except Exception:
+            connected_as = "نامشخص"
+        candidates: List[Any] = []
+        if username:
+            candidates.append(f"@{username.lstrip('@')}")
+        candidates.append("me")
+        candidates.append(int(settings.TELEGRAM_OWNER_ID))
+        errors: List[str] = []
+        for target in candidates:
+            try:
+                await self.client.send_message(target, text)
+                return {
+                    "status": "ok",
+                    "sent_via": str(target),
+                    "connected_as": connected_as,
+                    "message": "پیام از طریق اکانت تلگرام متصل (یوزربات) ارسال شد.",
+                }
+            except Exception as exc:
+                errors.append(f"{target}: {exc}")
+        logger.error(f"Failed to send message via user account: {errors}")
+        return {
+            "status": "error",
+            "connected_as": connected_as,
+            "error": (
+                "تلگرام نتوانست گیرنده را پیدا کند (PeerUser not found). "
+                f"سشن به حساب {connected_as} متصل است. "
+                "اگر این حساب شما نیست، سشن به اکانت اشتباه متصل شده و باید دوباره لاگین کنید. "
+                f"جزئیات: {'; '.join(errors)[:200]}"
+            ),
+        }
 
     async def list_accessible_channels(self, limit: int = 25) -> Dict[str, Any]:
         """Discovers channels that the connected Telegram user account has access to."""

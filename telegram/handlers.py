@@ -819,8 +819,10 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
                 k in norm_text for k in ("پیام بده", "پیام بفرست", "پیام بده بهم", "بهم پیام بده")
             ):
                 if manager.user_connector and manager.user_connector.is_connected:
+                    owner_username = message.from_user.username if message.from_user else None
                     res = await manager.user_connector.send_message_to_owner(
-                        "سلام! 👋 این پیام از طریق اکانت تلگرام متصل شما (یوزربات) ارسال شد — اتصال برقرار است. ✅"
+                        "سلام! 👋 این پیام از طریق اکانت تلگرام متصل شما (یوزربات) ارسال شد — اتصال برقرار است. ✅",
+                        username=owner_username,
                     )
                     if res.get("status") == "ok":
                         await message.answer(
