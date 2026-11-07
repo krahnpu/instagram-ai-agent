@@ -41,10 +41,14 @@ class AutonomousAgent:
         user_id: int,
         user_message: str,
         channel: str = "telegram",
+        on_step: Any = None,
     ) -> Dict[str, Any]:
         """
         Analyze user intent, plan multi-step execution, run permitted tools
         sequentially, verify outputs, and formulate final response.
+        on_step(step_idx, tool_name, phase) is an optional progress callback
+        (phase "start"/"done") so the chat can show what the agent is doing
+        right now instead of one frozen "thinking" line during long tools.
         """
         role = self.permissions.get_user_role(user_id)
         logger.info(f"Agent processing request from user_id={user_id} (role={role.value})")
@@ -137,7 +141,21 @@ class AutonomousAgent:
                     })
                     continue
 
+                # Tell the chat which tool is about to run (long tools like
+                # a download otherwise look frozen for minutes).
+                if on_step is not None:
+                    try:
+                        await on_step(step_idx, fn_name, "start")
+                    except Exception:
+                        pass
+
                 step_result = await self.executor.execute(fn_name, parsed_args)
+
+                if on_step is not None:
+                    try:
+                        await on_step(step_idx, fn_name, step_result.get("status", "done"))
+                    except Exception:
+                        pass
                 execution_trace.append({
                     "step": step_idx,
                     "tool": fn_name,
