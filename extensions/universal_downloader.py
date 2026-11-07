@@ -187,12 +187,25 @@ async def identify_song(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error",
                 "error": "پکیج shazamio نصب نیست. با ابزار approve_and_install_package پکیج shazamio را نصب کن و دوباره تلاش کن."}
     path = await _to_wav(Path(path_str))
+    shazam = None
     try:
         shazam = shazamio.Shazam()
-        res = await shazam.recognize_song(str(path))
+        # shazamio 0.9+ renamed recognize_song to recognize(data), where data
+        # is a path, bytes or bytearray. The old name no longer exists.
+        res = await shazam.recognize(str(path))
     except Exception as exc:
         return {"status": "error", "error": f"تشخیص آهنگ ناموفق بود: {exc}"}
+    finally:
+        if shazam is not None:
+            try:
+                await shazam.close()
+            except Exception:
+                pass
     track = (res or {}).get("track") or {}
+    if not track:
+        matches = (res or {}).get("matches") or []
+        if matches and isinstance(matches[0], dict):
+            track = matches[0].get("track") or {}
     if not track:
         return {"status": "ok", "found": False,
                 "message": "آهنگی پیدا نشد؛ شاید صدا واضح نیست یا این صدا آهنگ نیست."}
