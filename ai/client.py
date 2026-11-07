@@ -58,6 +58,11 @@ class AIClient:
             # raw provider JSON to the user — and never fabricate an answer.
             if "content_filter" in body:
                 return {"error": "content_filter"}
+            # The provider rejected the tool list itself (e.g. a malformed
+            # extension schema). Surface it typed so the agent can answer
+            # briefly instead of dumping raw provider JSON to the user.
+            if "validation errors" in body and "body.tools" in body:
+                return {"error": "tools_validation"}
             return {"error": f"HTTP {exc.response.status_code}: {body[:200]}"}
         except Exception as exc:
             logger.error(f"AI connection error: {exc}")
