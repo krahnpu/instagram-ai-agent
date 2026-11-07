@@ -82,12 +82,19 @@ def _ffmpeg_location() -> Optional[str]:
         return None
 
 
-def _run_ytdlp(args, timeout=300):
+def _run_ytdlp(args, timeout=180):
     base = _ytdlp_cmd_base()
     if not base:
         return None
     ff = _ffmpeg_location()
-    full = base + (["--ffmpeg-location", ff] if ff else []) + args
+    # YouTube throttles/blocks the default web client from datacenter IPs
+    # (Render): the android player client gets full-speed, unblocked streams,
+    # and --socket-timeout fails fast on stalled connections instead of
+    # hanging until the subprocess timeout.
+    full = base + (["--ffmpeg-location", ff] if ff else []) + [
+        "--socket-timeout", "30",
+        "--extractor-args", "youtube:player_client=android",
+    ] + args
     return subprocess.run(full, capture_output=True, text=True, timeout=timeout)
 
 
@@ -117,14 +124,32 @@ async def _download_and_send(url: str, kind: str, out_dir: Path, note: str = "")
         args = ["-f", "bv*[height<=720]+ba/b[height<=720]/b",
                 "--max-filesize", "45M", "--no-playlist", "-o", template, url]
     try:
-        proc = await asyncio.to_thread(_run_ytdlp, args, 300)
+        proc = await asyncio.to_thread(_run_ytdlp, args, 180)
     except subprocess.TimeoutExpired:
         return {"status": "error", "error": "دانلود طول کشید و متوقف شد؛ دوباره تلاش کن."}
     except Exception as exc:
         return {"status": "error", "error": f"خطا در اجرای دانلود: {exc}"}
     if not proc or proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "")[-500:] if proc else ""
-        return {"status": "error", "error": f"دانلود ناموفق بود: {err}"}
+        # YouTube search sometimes fails from a datacenter IP even with the
+        # android client — fall back to SoundCloud search for the same query.
+        if kind == "audio" and url.startswith("ytsearch1:"):
+            sc_url = "scsearch1:" + url[len("ytsearch1:"):]
+            sc_args = list(args)
+            sc_args[-1] = sc_url
+            try:
+                proc = await asyncio.to_thread(_run_ytdlp, sc_args, 180)
+            except subprocess.TimeoutExpired:
+                return {"status": "error", "error": "دانلود طول کشید و متوقف شد؛ دوباره تلاش کن."}
+            except Exception as exc:
+                return {"status": "error", "error": f"خطا در اجرای دانلود: {exc}"}
+            if proc and proc.returncode == 0:
+                pass
+            else:
+                sc_err = (proc.stderr or proc.stdout or "")[-500:] if proc else ""
+                return {"status": "error", "error": f"دانلود ناموفق بود: {sc_err}"}
+        else:
+            return {"status": "error", "error": f"دانلود ناموفق بود: {err}"}
     files = [p for p in job_dir.iterdir() if p.is_file()]
     if not files:
         return {"status": "error", "error": "دانلود تمام شد ولی فایلی ساخته نشد."}
