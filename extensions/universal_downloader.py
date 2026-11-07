@@ -20,6 +20,7 @@ Never put the handler function (or any Python object) inside the schema.
 """
 
 import asyncio
+import httpx
 import json
 import shutil
 import subprocess
@@ -238,6 +239,22 @@ async def _to_wav(path: Path) -> Path:
 
 # ---------------------------------------------------------------- tools
 
+def _spotify_title(url: str) -> Optional[str]:
+    """Get a Spotify track's title from Spotify's public oEmbed endpoint
+    (no auth needed). yt-dlp 2026.10.26 has no Spotify extractor, so its
+    metadata fetch always fails with a DRM error — oEmbed is the way to
+    learn the track name from a Spotify link. Returns None on failure."""
+    try:
+        with httpx.Client(timeout=10.0, follow_redirects=True) as client:
+            resp = client.get("https://open.spotify.com/oembed",
+                              params={"url": url})
+            resp.raise_for_status()
+            title = (resp.json().get("title") or "").strip()
+            return title or None
+    except Exception:
+        return None
+
+
 async def download_media(args: Dict[str, Any]) -> Dict[str, Any]:
     url = (args.get("url") or "").strip()
     kind = (args.get("kind") or "auto").strip().lower()
@@ -247,19 +264,40 @@ async def download_media(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error",
                 "error": "yt-dlp نصب نیست. با ابزار approve_and_install_package پکیج yt-dlp را نصب کن و دوباره تلاش کن."}
     out_dir = _media_dir()
-    # Spotify serves metadata only through yt-dlp, no audio. Find the same
-    # track on YouTube instead and say so.
+    # Spotify serves metadata only through yt-dlp, no audio — and yt-dlp
+    # 2026.10.26 has no Spotify extractor at all, so its metadata fetch
+    # always fails with a DRM error. Learn the track name from Spotify's
+    # public oEmbed endpoint instead, then find the same track on SoundCloud
+    # or YouTube. Try several query forms in order — the exact
+    # "artist - title" is not always findable.
     if "open.spotify.com" in url or url.startswith("spotify:"):
         meta = await asyncio.to_thread(_ytdlp_json, url)
-        if not meta:
+        artist = ""
+        title = ""
+        if meta:
+            artist = (meta.get("artist") or meta.get("uploader") or "").strip()
+            title = (meta.get("title") or "").strip()
+        if not title:
+            title = await asyncio.to_thread(_spotify_title, url) or ""
+        if not title:
             return {"status": "error", "error": "نتوانستم اطلاعات آهنگ اسپاتیفای را بخوانم."}
-        artist = (meta.get("artist") or meta.get("uploader") or "").strip()
-        title = (meta.get("title") or "").strip()
-        query = f"{artist} - {title}".strip(" -") or title
-        return await _download_and_send(
-            f"ytsearch1:{query}", "audio", out_dir,
-            note=f"اسپاتیفای صدا را مستقیم نمی‌دهد؛ همین آهنگ را از یوتیوب پیدا کردم: {query}",
-        )
+        queries: list[str] = []
+        if artist and title:
+            queries.append(f"{artist} - {title}")
+        if title:
+            queries.append(title)
+        if artist and title:
+            queries.append(f"{title} {artist}")
+        last_err = ""
+        for q in queries:
+            dl = await _download_and_send(
+                f"ytsearch1:{q}", "audio", out_dir,
+                note=f"اسپاتیفای صدا را مستقیم نمی‌دهد؛ همین آهنگ را از ساندکلاد یا یوتیوب پیدا کردم: {q}",
+            )
+            if dl.get("status") != "error":
+                return dl
+            last_err = dl.get("error", "")
+        return {"status": "error", "error": f"آهنگ اسپاتیفای پیدا نشد: {last_err}"}
     if kind == "audio":
         return await _download_and_send(url, "audio", out_dir)
     return await _download_and_send(url, "video", out_dir)
