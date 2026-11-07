@@ -123,33 +123,37 @@ async def _download_and_send(url: str, kind: str, out_dir: Path, note: str = "")
     else:
         args = ["-f", "bv*[height<=720]+ba/b[height<=720]/b",
                 "--max-filesize", "45M", "--no-playlist", "-o", template, url]
-    try:
-        proc = await asyncio.to_thread(_run_ytdlp, args, 180)
-    except subprocess.TimeoutExpired:
-        return {"status": "error", "error": "دانلود طول کشید و متوقف شد؛ دوباره تلاش کن."}
-    except Exception as exc:
-        return {"status": "error", "error": f"خطا در اجرای دانلود: {exc}"}
+    # Song search order (user's choice): SoundCloud first, YouTube second.
+    # SoundCloud is fast and unblocked from datacenter IPs; YouTube is the
+    # fallback. Direct URLs are tried as-is.
+    candidates = [url]
+    if kind == "audio" and url.startswith("ytsearch1:"):
+        _q = url[len("ytsearch1:"):]
+        candidates = [f"scsearch1:{_q}", url]
+    elif kind == "audio" and url.startswith("scsearch1:"):
+        _q = url[len("scsearch1:"):]
+        candidates = [url, f"ytsearch1:{_q}"]
+    proc = None
+    last_err = ""
+    for cand in candidates:
+        cand_args = list(args)
+        cand_args[-1] = cand
+        try:
+            proc = await asyncio.to_thread(_run_ytdlp, cand_args, 180)
+        except subprocess.TimeoutExpired:
+            last_err = "دانلود طول کشید و متوقف شد"
+            proc = None
+            continue
+        except Exception as exc:
+            last_err = f"خطا در اجرای دانلود: {exc}"
+            proc = None
+            continue
+        if proc and proc.returncode == 0:
+            break
+        last_err = ((proc.stderr or proc.stdout or "")[-500:] if proc else "")
+        proc = None
     if not proc or proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "")[-500:] if proc else ""
-        # YouTube search sometimes fails from a datacenter IP even with the
-        # android client — fall back to SoundCloud search for the same query.
-        if kind == "audio" and url.startswith("ytsearch1:"):
-            sc_url = "scsearch1:" + url[len("ytsearch1:"):]
-            sc_args = list(args)
-            sc_args[-1] = sc_url
-            try:
-                proc = await asyncio.to_thread(_run_ytdlp, sc_args, 180)
-            except subprocess.TimeoutExpired:
-                return {"status": "error", "error": "دانلود طول کشید و متوقف شد؛ دوباره تلاش کن."}
-            except Exception as exc:
-                return {"status": "error", "error": f"خطا در اجرای دانلود: {exc}"}
-            if proc and proc.returncode == 0:
-                pass
-            else:
-                sc_err = (proc.stderr or proc.stdout or "")[-500:] if proc else ""
-                return {"status": "error", "error": f"دانلود ناموفق بود: {sc_err}"}
-        else:
-            return {"status": "error", "error": f"دانلود ناموفق بود: {err}"}
+        return {"status": "error", "error": f"دانلود ناموفق بود: {last_err}"}
     files = [p for p in job_dir.iterdir() if p.is_file()]
     if not files:
         return {"status": "error", "error": "دانلود تمام شد ولی فایلی ساخته نشد."}
