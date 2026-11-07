@@ -141,7 +141,7 @@ class ModelManager:
             "api_key": decrypted_key,
             "model_name": row["model_name"],
             "temperature": float(row.get("temperature", 0.4)),
-            "max_tokens": int(row.get("max_tokens", 1500)),
+            "max_tokens": int(row.get("max_tokens", 4000)),
             "timeout": int(row.get("timeout", 45)),
         }
 

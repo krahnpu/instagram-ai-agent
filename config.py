@@ -64,7 +64,7 @@ class Settings:
     AI_API_KEY: str = os.getenv("AI_API_KEY", "")
     AI_MODEL_NAME: str = os.getenv("AI_MODEL_NAME", "")
     AI_TEMPERATURE: float = float(os.getenv("AI_TEMPERATURE", "0.4"))
-    AI_MAX_TOKENS: int = int(os.getenv("AI_MAX_TOKENS", "1500"))
+    AI_MAX_TOKENS: int = int(os.getenv("AI_MAX_TOKENS", "4000"))
     AI_TIMEOUT: int = int(os.getenv("AI_TIMEOUT", "45"))
 
     # 4. Instagram Session Configuration

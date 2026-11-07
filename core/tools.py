@@ -122,9 +122,18 @@ class ToolRegistry:
                 path = Path(file_path)
                 if not path.exists() or not path.is_file():
                     return {"status": "error", "error": f"فایل یافت نشد: {file_path}"}
+                # Never send a 0-byte file to Telegram: it rejects it with
+                # "file must be non-empty" and the raw error ends up in chat.
+                if path.stat().st_size == 0:
+                    return {"status": "error", "error": "فایل خالی است؛ اول محتوا را کامل بنویس بعد بفرست."}
             else:
                 if "/" in filename or "\\" in filename or not filename.strip() or filename.strip() in {".", ".."}:
                     return {"status": "error", "error": "نام فایل معتبر نیست. فقط نام فایل بدهید، بدون پوشه."}
+                # The model sometimes calls this tool with empty content on
+                # its first attempt — reject it here with an actionable
+                # instruction instead of letting Telegram fail cryptically.
+                if not content.strip():
+                    return {"status": "error", "error": "محتوای فایل خالی است؛ کد کامل را در همان فراخوانی بنویس و دوباره بفرست. هرگز با محتوای خالی ابزار را صدا نزن."}
                 safe_name = Path(filename).name
                 if len(content.encode("utf-8")) > 5 * 1024 * 1024:
                     return {"status": "error", "error": "محتوای فایل بزرگ‌تر از ۵ مگابایت است."}
