@@ -16,6 +16,71 @@ from telegram.keyboards import (
 )
 from telegram.admin import AdminCommandController
 
+# --- Media helpers (module level, so they are unit-testable) -----------------
+# What kind of media a message carries, and how to tell the agent about it.
+# Used by the audio/video/document handlers and by reply-to-media
+# resolution in the text handler, so "استخراجش کن" on a replied-to video
+# and "آهنگش را پیدا کن" on a replied-to audio file work without the user
+# having to send the file again.
+
+_MEDIA_AUDIO_EXTS = (".mp3", ".ogg", ".oga", ".wav", ".m4a", ".flac", ".aac", ".opus")
+_MEDIA_VIDEO_EXTS = (".mp4", ".mov", ".mkv", ".webm", ".avi")
+_MEDIA_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
+
+
+def _pick_message_media(msg: Any) -> tuple[Any, str, str] | None:
+    """Return (file_object, kind, suffix) for a message's media, else None.
+    kind is one of: video, audio, voice, photo."""
+    if getattr(msg, "video", None):
+        return msg.video, "video", ".mp4"
+    if getattr(msg, "video_note", None):
+        return msg.video_note, "video", ".mp4"
+    if getattr(msg, "audio", None):
+        return msg.audio, "audio", ".mp3"
+    if getattr(msg, "voice", None):
+        return msg.voice, "voice", ".ogg"
+    photo = getattr(msg, "photo", None)
+    if photo:
+        return photo[-1], "photo", ".jpg"
+    doc = getattr(msg, "document", None)
+    if doc:
+        name = (doc.file_name or "").lower()
+        mime = (doc.mime_type or "").lower()
+        if mime.startswith("video/") or name.endswith(_MEDIA_VIDEO_EXTS):
+            return doc, "video", ".mp4"
+        if mime.startswith("audio/") or name.endswith(_MEDIA_AUDIO_EXTS):
+            return doc, "audio", ".mp3"
+        if mime.startswith("image/") or name.endswith(_MEDIA_IMAGE_EXTS):
+            return doc, "photo", ".jpg"
+    return None
+
+
+def _media_prompt(kind: str, path: Path, user_text: str, replied: bool = False) -> str:
+    """Build the agent prompt for a media file the user sent or replied to.
+    Always includes the saved path and tells the agent NOT to ask for the
+    file again — the file is already here."""
+    where = "روی آن ریپلای کرده" if replied else "فرستاده"
+    if kind == "video":
+        return (
+            f"کاربر روی یک ویدئو {where} و گفته: «{user_text}». "
+            f"فایل ویدئو در این مسیر ذخیره شده: {path}. "
+            "همین فایل را پردازش کن؛ از کاربر نخواه دوباره آن را بفرستد. "
+            "اگر خواست آهنگش را پیدا کنی از identify_song یا find_song_of_video استفاده کن، "
+            "اگر خواست دانلودش کنی از download_media، و اگر خواست توصیفش کنی از describe_video."
+        )
+    if kind in ("audio", "voice"):
+        return (
+            f"کاربر یک فایل صوتی {where} و گفته: «{user_text}». "
+            f"فایل صوتی در این مسیر ذخیره شده: {path}. "
+            "آهنگ داخل آن را با identify_song پیدا کن و برایش بفرست؛ "
+            "از کاربر نخواه دوباره آن را بفرستد."
+        )
+    return (
+        f"کاربر یک عکس {where} و گفته: «{user_text}». "
+        f"فایل عکس در این مسیر ذخیره شده: {path}. "
+        "با describe_image توصیفش کن؛ از کاربر نخواه دوباره آن را بفرستد."
+    )
+
 
 def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
     perms = PermissionManager()
@@ -410,6 +475,35 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
                     )
             return
 
+        # Media sent as a file (a video, audio or image as a document):
+        # download it and let the agent work on it instead of demanding
+        # a .json file. Session (.session) and .json files are handled above.
+        media = _pick_message_media(message)
+        if media is not None:
+            media_obj, kind, suffix = media
+            if not manager.bot:
+                return
+            media_dir = Path(settings.TEMP_MEDIA_DIR)
+            media_dir.mkdir(parents=True, exist_ok=True)
+            media_path = media_dir / f"doc_{kind}_{uid}_{message.message_id}{suffix}"
+            await manager.bot.download(media_obj, destination=media_path)
+            caption = (message.caption or "").strip()
+            user_text = caption or (
+                "آهنگش را پیدا کن و برایم بفرست." if kind in ("audio", "voice") else "این فایل را پردازش کن."
+            )
+            prompt = _media_prompt(kind, media_path, user_text)
+
+            async def _run_doc_media(update_progress: Any) -> str:
+                await update_progress("<b>در حال پردازش فایل… ⏳</b>")
+                result = await manager.agent.process_command(user_id=uid, user_message=prompt, channel="telegram")
+                return result.get("reply", "")
+
+            await manager.rich_responder.run_with_thinking_stream(
+                chat_id=message.chat.id,
+                coro_factory=_run_doc_media,
+            )
+            return
+
         if not file_name.endswith(".json"):
             await message.answer("⚠️ لطفاً یک فایل با پسوند <code>.json</code> حاوی Session یا Cookie اینستاگرام ارسال کنید.")
             return
@@ -472,6 +566,62 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
         await manager.rich_responder.run_with_thinking_stream(
             chat_id=message.chat.id,
             coro_factory=_run_voice,
+        )
+
+    # Audio files (music): download and let the agent identify the song
+    # (identify_song tool). Without this handler an audio message matched
+    # no handler at all and was silently ignored.
+    @dp.message(F.audio)
+    async def handle_audio_message(message: Message) -> None:
+        uid = message.from_user.id if message.from_user else 0
+        if err := _deny_if_not_owner(uid):
+            await message.answer(err)
+            return
+        if not message.audio or not manager.bot:
+            return
+        media_dir = Path(settings.TEMP_MEDIA_DIR)
+        media_dir.mkdir(parents=True, exist_ok=True)
+        audio_path = media_dir / f"audio_{uid}_{message.message_id}.mp3"
+        await manager.bot.download(message.audio, destination=audio_path)
+        user_text = (message.caption or "").strip() or "آهنگش را پیدا کن و برایم بفرست."
+        prompt = _media_prompt("audio", audio_path, user_text)
+
+        async def _run_audio(update_progress: Any) -> str:
+            await update_progress("<b>در حال گوش دادن به فایل صوتی… 🎵</b>")
+            result = await manager.agent.process_command(user_id=uid, user_message=prompt, channel="telegram")
+            return result.get("reply", "")
+
+        await manager.rich_responder.run_with_thinking_stream(
+            chat_id=message.chat.id,
+            coro_factory=_run_audio,
+        )
+
+    # Videos (and round video notes): download and let the agent work on the
+    # file itself — find its song, download it, or describe it.
+    @dp.message(F.video | F.video_note)
+    async def handle_video_message(message: Message) -> None:
+        uid = message.from_user.id if message.from_user else 0
+        if err := _deny_if_not_owner(uid):
+            await message.answer(err)
+            return
+        media_obj = message.video or message.video_note
+        if not media_obj or not manager.bot:
+            return
+        media_dir = Path(settings.TEMP_MEDIA_DIR)
+        media_dir.mkdir(parents=True, exist_ok=True)
+        video_path = media_dir / f"video_{uid}_{message.message_id}.mp4"
+        await manager.bot.download(media_obj, destination=video_path)
+        user_text = (message.caption or "").strip() or "این ویدئو را پردازش کن."
+        prompt = _media_prompt("video", video_path, user_text)
+
+        async def _run_video(update_progress: Any) -> str:
+            await update_progress("<b>در حال پردازش ویدئو… 🎬</b>")
+            result = await manager.agent.process_command(user_id=uid, user_message=prompt, channel="telegram")
+            return result.get("reply", "")
+
+        await manager.rich_responder.run_with_thinking_stream(
+            chat_id=message.chat.id,
+            coro_factory=_run_video,
         )
 
     # Photos: download the photo and let the agent describe what is in it
@@ -1039,6 +1189,25 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
                 else:
                     await message.answer(f"❌ نتوانستم یادآوری را تنظیم کنم: {res.get('error')}")
                 return
+
+        # 2b. Reply-to-media: if the user replied to a message carrying a
+        # video, audio, voice note or photo, download THAT file and tell the
+        # agent its path, so "استخراجش کن" / "آهنگش را پیدا کن" works on the
+        # replied-to file instead of asking the user to send it again.
+        if message.reply_to_message is not None and manager.bot:
+            replied = message.reply_to_message
+            media = _pick_message_media(replied)
+            if media is not None:
+                media_obj, kind, suffix = media
+                media_dir = Path(settings.TEMP_MEDIA_DIR)
+                media_dir.mkdir(parents=True, exist_ok=True)
+                media_path = media_dir / f"reply_{kind}_{uid}_{replied.message_id}{suffix}"
+                await manager.bot.download(media_obj, destination=media_path)
+                text = _media_prompt(kind, media_path, text, replied=True)
+            else:
+                quoted = (replied.text or replied.caption or "").strip()
+                if quoted:
+                    text = f"کاربر روی این پیام ریپلای کرده: «{quoted}»\n\nدستور کاربر: {text}"
 
         # 3. Standard Natural Language Processing using Telegram Rich Message Draft (<tg-thinking>Thinking…</tg-thinking>)
         async def _execute_with_draft_updates(update_progress: Any) -> str:
