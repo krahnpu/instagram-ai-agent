@@ -445,6 +445,63 @@ def register_all_handlers(dp: Dispatcher, manager: Any) -> None:
                 f"• خطا: {res.get('error')}"
             )
 
+    # Voice messages: download the voice note and let the agent identify
+    # the song in it (identify_song tool), then reply with the result.
+    @dp.message(F.voice)
+    async def handle_voice_message(message: Message) -> None:
+        uid = message.from_user.id if message.from_user else 0
+        if err := _deny_if_not_owner(uid):
+            await message.answer(err)
+            return
+        if not message.voice or not manager.bot:
+            return
+        media_dir = Path(settings.TEMP_MEDIA_DIR)
+        media_dir.mkdir(parents=True, exist_ok=True)
+        voice_path = media_dir / f"voice_{uid}_{message.message_id}.ogg"
+        await manager.bot.download(message.voice, destination=voice_path)
+        prompt = (
+            "یک پیام صوتی فرستادم و در این مسیر ذخیره شد: "
+            f"{voice_path} — آهنگ داخل آن را پیدا کن و برایم بفرست."
+        )
+
+        async def _run_voice(update_progress: Any) -> str:
+            await update_progress("<b>در حال گوش دادن به پیام صوتی… 🎵</b>")
+            result = await manager.agent.process_command(user_id=uid, user_message=prompt, channel="telegram")
+            return result.get("reply", "")
+
+        await manager.rich_responder.run_with_thinking_stream(
+            chat_id=message.chat.id,
+            coro_factory=_run_voice,
+        )
+
+    # Photos: download the photo and let the agent describe what is in it
+    # (describe_image tool). A caption, if sent with the photo, is the question.
+    @dp.message(F.photo)
+    async def handle_photo_message(message: Message) -> None:
+        uid = message.from_user.id if message.from_user else 0
+        if err := _deny_if_not_owner(uid):
+            await message.answer(err)
+            return
+        if not message.photo or not manager.bot:
+            return
+        largest = message.photo[-1]
+        media_dir = Path(settings.TEMP_MEDIA_DIR)
+        media_dir.mkdir(parents=True, exist_ok=True)
+        photo_path = media_dir / f"photo_{uid}_{message.message_id}.jpg"
+        await manager.bot.download(largest, destination=photo_path)
+        question = (message.caption or "").strip() or "تو این عکس چی هست؟ توصیفش کن."
+        prompt = f"این عکس را ببین و توصیف کن: {photo_path} — سوال من: {question}"
+
+        async def _run_photo(update_progress: Any) -> str:
+            await update_progress("<b>در حال دیدن عکس… 👀</b>")
+            result = await manager.agent.process_command(user_id=uid, user_message=prompt, channel="telegram")
+            return result.get("reply", "")
+
+        await manager.rich_responder.run_with_thinking_stream(
+            chat_id=message.chat.id,
+            coro_factory=_run_photo,
+        )
+
     # Interactive Callback Queries for /مدل, Task Engine, Wizards, and Confirmations
     @dp.callback_query()
     async def handle_all_callbacks(callback: CallbackQuery) -> None:
