@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List
@@ -89,7 +90,22 @@ class ToolRegistry:
 
     def register_extension_tool(self, name: str, schema: Dict[str, Any], handler: Callable[..., Any]) -> None:
         """Register one tool from a self-written extension module. The
-        handler may be sync or async and receives the tool arguments dict."""
+        handler may be sync or async and receives the tool arguments dict.
+
+        The schema must be plain JSON data (OpenAI function-calling format:
+        only name/description/parameters — never the handler function or any
+        other Python object inside it). A schema that cannot be JSON-encoded
+        would break EVERY later AI call with "Object of type function is not
+        JSON serializable", so it is rejected here instead of registered.
+        """
+        try:
+            json.dumps(schema, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            logger.error(f"Extension tool '{name}' schema is not JSON serializable, rejected: {exc}")
+            raise ValueError(
+                f"اسکیمای ابزار '{name}' قابل تبدیل به JSON نیست ({exc})؛ "
+                "داخل اسکیما فقط name و description و parameters بگذار، نه خود تابع را."
+            )
         self.extension_tools[name] = handler
         self.extension_schemas = [s for s in self.extension_schemas if s["function"]["name"] != name]
         self.extension_schemas.append(schema)
@@ -699,7 +715,18 @@ class ToolRegistry:
         ]
 
         if role == Role.OWNER:
-            return all_tools + self.extension_schemas
+            # Defense in depth: never let a bad extension schema poison the
+            # AI request — a single non-serializable schema breaks every
+            # chat_completion call, so skip (and log) any that fail encoding.
+            safe_extension_schemas: List[Dict[str, Any]] = []
+            for schema in self.extension_schemas:
+                try:
+                    json.dumps(schema, ensure_ascii=False)
+                    safe_extension_schemas.append(schema)
+                except (TypeError, ValueError) as exc:
+                    bad_name = (schema or {}).get("function", {}).get("name", "?")
+                    logger.error(f"Skipping non-serializable extension schema '{bad_name}': {exc}")
+            return all_tools + safe_extension_schemas
 
         return [
             t for t in all_tools
@@ -830,6 +857,19 @@ class ToolRegistry:
             if result.get("status") == "ok":
                 loaded = load_extensions(self)
                 result["loaded_now"] = loaded
+                if result.get("name") not in loaded:
+                    # The module failed to load (e.g. a tool schema that is
+                    # not JSON-serializable) — say so clearly instead of
+                    # claiming success while the tool never went live.
+                    return {
+                        "status": "error",
+                        "error": (
+                            f"افزونه {result.get('name', '')} ذخیره شد ولی بارگذاری نشد؛ "
+                            "احتمالا اسکیمای ابزار داخل آن قابل تبدیل به JSON نیست. "
+                            "لاگ را با read_recent_logs بررسی کن و اسکیما را اصلاح کن."
+                        ),
+                        "path": result.get("path", ""),
+                    }
                 # Send the extension file to the owner so it can be added to
                 # the repo — otherwise the next redeploy wipes it.
                 await self._send_file_to_owner(
