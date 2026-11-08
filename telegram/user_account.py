@@ -356,7 +356,37 @@ class TelegramUserAccountConnector:
         except Exception as exc:
             return {"status": "error", "error": str(exc)}
 
-    async def fetch_latest_channel_media(self, channel_username: str, limit: int = 5) -> Dict[str, Any]:
+    async def list_latest_channel_media(self, channel_username: str, limit: int = 5) -> Dict[str, Any]:
+        """List the latest media messages of a channel WITHOUT downloading
+        anything, so a sync task can decide what is new before it spends
+        bandwidth. Returns [{message_id, media_type, caption}]."""
+        if not self.client or not self.is_connected:
+            return {
+                "status": "not_connected",
+                "error": "حساب کاربری تلگرام (Telethon) متصل نیست. از دستور /channels یا منوی اتصال تلگرام اقدام کنید.",
+            }
+
+        clean_channel = channel_username.lstrip("@").strip()
+        items: List[Dict[str, Any]] = []
+        try:
+            async for msg in self.client.iter_messages(clean_channel, limit=limit):
+                if msg.video or msg.photo:
+                    items.append(
+                        {
+                            "message_id": msg.id,
+                            "channel": clean_channel,
+                            "media_type": "video" if msg.video else "photo",
+                            "caption": msg.text or "",
+                        }
+                    )
+            return {"status": "ok", "channel": clean_channel, "media_items": items}
+        except Exception as exc:
+            logger.error(f"Failed listing media from channel {clean_channel}: {exc}")
+            return {"status": "error", "error": str(exc)}
+
+    async def fetch_latest_channel_media(
+        self, channel_username: str, limit: int = 5, message_ids: Optional[List[int]] = None
+    ) -> Dict[str, Any]:
         if not self.client or not self.is_connected:
             return {
                 "status": "not_connected",
@@ -368,7 +398,15 @@ class TelegramUserAccountConnector:
 
         try:
             self.media_processor.enforce_storage_quota()
-            async for msg in self.client.iter_messages(clean_channel, limit=limit):
+            if message_ids:
+                # Fetch only the requested messages (used by the sync task
+                # after it worked out which ones are new) instead of
+                # re-downloading the whole recent window every run.
+                fetched = await self.client.get_messages(clean_channel, ids=list(message_ids))
+                messages = fetched if isinstance(fetched, list) else ([fetched] if fetched else [])
+            else:
+                messages = [msg async for msg in self.client.iter_messages(clean_channel, limit=limit)]
+            for msg in messages:
                 if msg.video or msg.photo:
                     ext = ".mp4" if msg.video else ".jpg"
                     target_file = Path(settings.TEMP_MEDIA_DIR) / f"{clean_channel}_{msg.id}{ext}"
