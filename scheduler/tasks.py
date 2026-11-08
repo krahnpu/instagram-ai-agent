@@ -1,5 +1,6 @@
+import re
 from datetime import datetime, timezone
-from typing import Any, Callable, Coroutine, Optional
+from typing import Any, Callable, Coroutine, Dict, Optional
 from memory.database import DatabaseManager
 from utils.logger import get_logger
 
@@ -21,6 +22,14 @@ class ScheduledTaskRunner:
         "rate_limit",
         "security_halt",
     }
+
+    # Channel-to-Instagram sync: only these captions mark a video as an ad.
+    _PROMO_MARKERS = ("تبلیغ", "تبلیغات", "پروموشن", "sponsored", "advertisement", "آگهی")
+    # How many recent channel messages to inspect per run, and how many
+    # reels to publish per run (cap avoids Instagram rate-limit bursts when
+    # several new videos piled up; the rest follow on later runs).
+    _CHANNEL_SYNC_FETCH_LIMIT = 10
+    _CHANNEL_SYNC_MAX_POSTS = 3
 
     def __init__(
         self,
@@ -194,10 +203,126 @@ class ScheduledTaskRunner:
                     )
                 return
 
-            await self._update_task_run(task_id, now_iso, "موفق")
+            if task_type == "channel_to_instagram_sync":
+                status_text = await self._run_channel_sync(task_id, task)
+                # None means the run already recorded its own status
+                # (e.g. it halted the task on an Instagram security error).
+                if status_text is not None:
+                    await self._update_task_run(task_id, now_iso, status_text)
+                return
+
+            # Any other type has no runner implementation yet. Report that
+            # honestly instead of a fake "موفق": a task that does nothing
+            # must never look successful.
+            await self._update_task_run(
+                task_id, now_iso, f"خطا: اجرای تسک از نوع {task_type} هنوز پیاده نشده است"
+            )
         except Exception as exc:
             logger.error(f"Task {task_id} execution error: {exc}")
             await self._update_task_run(task_id, now_iso, f"خطا: {str(exc)[:80]}")
+
+    def _extract_channel(self, task: Dict[str, Any]) -> str:
+        """Channel username for a sync task: stored payload first, then the
+        task's own instruction text (@name, t.me/name, or 'کانال <name>')."""
+        payload = task.get("action_payload")
+        if isinstance(payload, dict):
+            channel = str(payload.get("channel_username") or "").strip().lstrip("@")
+            if channel:
+                return channel
+        text = task.get("natural_instruction") or ""
+        for pattern in (r"@([A-Za-z0-9_]{5,})", r"t\.me/([A-Za-z0-9_]{5,})", r"کانال\s+([A-Za-z0-9_]{5,})"):
+            match = re.search(pattern, text)
+            if match:
+                return match.group(1)
+        return ""
+
+    async def _run_channel_sync(self, task_id: str, task: Dict[str, Any]) -> Optional[str]:
+        """Sync new videos from a Telegram channel to Instagram Reels.
+
+        Only videos that were never processed are downloaded and published
+        (deduplicated by message_id in processed_events), promo videos are
+        skipped by caption, and the status always reports real counts —
+        never a bare 'موفق' when nothing happened.
+        """
+        channel = self._extract_channel(task)
+        if not channel:
+            return (
+                "خطا: کانال تلگرام برای این تسک مشخص نشده — "
+                "دستور ساخت تسک باید نام کانال (مثل @meme_ol_ski) را داشته باشد"
+            )
+
+        registry = getattr(self.agent, "tool_registry", None)
+        connector = getattr(registry, "user_connector", None)
+        if connector is None or not getattr(connector, "is_connected", False):
+            return "یوزربات تلگرام متصل نیست؛ دور بعد دوباره تلاش می‌شود"
+        publisher = getattr(registry, "ig_publisher", None)
+        if publisher is None:
+            return "خطا: منتشرکننده اینستاگرام در دسترس نیست"
+
+        listed = await connector.list_latest_channel_media(
+            channel, limit=self._CHANNEL_SYNC_FETCH_LIMIT
+        )
+        if listed.get("status") != "ok":
+            return f"خطا در خواندن کانال @{channel}: {str(listed.get('error', ''))[:80]}"
+
+        # Oldest first so reels post in channel order.
+        items = list(reversed(listed.get("media_items", [])))
+        posted = 0
+        skipped_seen = 0
+        skipped_promo = 0
+        skipped_photo = 0
+        errors: list[str] = []
+        to_post: list[tuple[int, str, str]] = []
+
+        for item in items:
+            message_id = item.get("message_id")
+            if not message_id:
+                continue
+            event_key = f"ch:{channel}:{message_id}"
+            if await self._is_event_processed(event_key):
+                skipped_seen += 1
+                continue
+            if item.get("media_type") != "video":
+                skipped_photo += 1
+                await self._mark_event_processed(event_key, task_id)
+                continue
+            caption = item.get("caption") or ""
+            if any(marker in caption for marker in self._PROMO_MARKERS):
+                skipped_promo += 1
+                await self._mark_event_processed(event_key, task_id)
+                continue
+            to_post.append((message_id, event_key, caption))
+
+        for message_id, event_key, caption in to_post[: self._CHANNEL_SYNC_MAX_POSTS]:
+            fetched = await connector.fetch_latest_channel_media(
+                channel, limit=1, message_ids=[message_id]
+            )
+            if fetched.get("status") != "ok" or not fetched.get("media_items"):
+                errors.append(f"{message_id}: {str(fetched.get('error', 'دریافت نشد'))[:40]}")
+                continue
+            media = fetched["media_items"][0]
+            res = await publisher.publish_reel(
+                media["file_path"], caption, thumbnail=media.get("thumbnail_path")
+            )
+            status = res.get("status", "")
+            if status in self.SECURITY_STOP_STATUSES:
+                await self._halt_on_security_error(task_id, res.get("error", status))
+                return None
+            if status == "موفق":
+                posted += 1
+                await self._mark_event_processed(event_key, task_id)
+            else:
+                errors.append(f"{message_id}: {str(res.get('error', status))[:40]}")
+
+        if errors:
+            return (
+                f"خطا در انتشار {len(errors)} ویدئو ({posted} منتشر شد): "
+                f"{'; '.join(errors)[:100]}"
+            )
+        return (
+            f"موفق ({posted} ریل جدید منتشر شد، {skipped_seen} تکراری رد شد، "
+            f"{skipped_promo} تبلیغاتی رد شد، {skipped_photo} عکس رد شد)"
+        )
 
     async def _update_task_run(self, task_id: str, now_iso: str, status_text: str) -> None:
         await self.db.execute(
