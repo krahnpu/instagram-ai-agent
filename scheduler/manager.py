@@ -211,10 +211,22 @@ class SchedulerManager:
             schedule_kind = "event_driven"
             interval_seconds = 45
 
+        # A channel sync task is useless without the channel: pull the
+        # username out of the instruction (@name, t.me/name, "کانال <name>")
+        # so it is stored with the task instead of guessed at run time.
+        channel_username = ""
+        if task_type == "channel_to_instagram_sync":
+            for pattern in (r"@([A-Za-z0-9_]{5,})", r"t\.me/([A-Za-z0-9_]{5,})", r"کانال\s+([A-Za-z0-9_]{5,})"):
+                match = re.search(pattern, normalized)
+                if match:
+                    channel_username = match.group(1)
+                    break
+
         return {
             "title": title,
             "natural_instruction": text.strip(),
             "task_type": task_type,
+            "channel_username": channel_username,
             "schedule_kind": schedule_kind,
             "interval_seconds": interval_seconds,
             "cron_expr": cron_expr,
@@ -254,6 +266,10 @@ class SchedulerManager:
         spec = self.parse_natural_language_task(instruction)
         task_id = f"tsk_{uuid.uuid4().hex[:8]}"
 
+        payload: Dict[str, Any] = {"instruction": spec["natural_instruction"]}
+        if spec.get("channel_username"):
+            payload["channel_username"] = spec["channel_username"]
+
         await self.db.execute(
             """
             INSERT INTO dynamic_tasks (
@@ -270,7 +286,7 @@ class SchedulerManager:
                 spec["schedule_kind"],
                 spec["interval_seconds"],
                 spec["cron_expr"],
-                json.dumps({"instruction": spec["natural_instruction"]}, ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False),
                 1 if auto_approve else 0,
                 "فعال و در حال اجرا" if auto_approve else "نیازمند تأیید ادمین اصلی",
             ),
@@ -367,11 +383,18 @@ class SchedulerManager:
         ]
 
     def _format_row(self, r: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            payload = json.loads(r.get("action_payload_json") or "{}")
+        except (ValueError, TypeError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
         return {
             "task_id": r["task_id"],
             "title": r["title"],
             "natural_instruction": r["natural_instruction"],
             "task_type": r["task_type"],
+            "action_payload": payload,
             "schedule_kind": r["schedule_kind"],
             "interval_seconds": int(r["interval_seconds"] or 0),
             "cron_expr": r["cron_expr"] or "",
