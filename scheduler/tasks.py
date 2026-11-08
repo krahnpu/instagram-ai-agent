@@ -1,6 +1,7 @@
 import re
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, Optional
+from config import settings
 from memory.database import DatabaseManager
 from utils.logger import get_logger
 
@@ -30,6 +31,10 @@ class ScheduledTaskRunner:
     # several new videos piled up; the rest follow on later runs).
     _CHANNEL_SYNC_FETCH_LIMIT = 10
     _CHANNEL_SYNC_MAX_POSTS = 3
+    # Comment auto-reply: how many recent posts to check per run, and how
+    # many comment replies to send per run (cap avoids spam / rate limits).
+    _COMMENTS_MAX_POSTS = 6
+    _COMMENTS_MAX_REPLIES = 5
 
     def __init__(
         self,
@@ -211,6 +216,18 @@ class ScheduledTaskRunner:
                     await self._update_task_run(task_id, now_iso, status_text)
                 return
 
+            if task_type == "auto_reply_comments":
+                status_text = await self._run_auto_reply_comments(task_id)
+                if status_text is not None:
+                    await self._update_task_run(task_id, now_iso, status_text)
+                return
+
+            if task_type == "custom_agent_prompt":
+                status_text = await self._run_custom_agent_prompt(task_id, task)
+                if status_text is not None:
+                    await self._update_task_run(task_id, now_iso, status_text)
+                return
+
             # Any other type has no runner implementation yet. Report that
             # honestly instead of a fake "موفق": a task that does nothing
             # must never look successful.
@@ -323,6 +340,112 @@ class ScheduledTaskRunner:
             f"موفق ({posted} ریل جدید منتشر شد، {skipped_seen} تکراری رد شد، "
             f"{skipped_promo} تبلیغاتی رد شد، {skipped_photo} عکس رد شد)"
         )
+
+    async def _run_auto_reply_comments(self, task_id: str) -> Optional[str]:
+        """Reply to new comments on the owner's recent posts.
+
+        Mirrors the DM auto-reply: newest comments first, skip the owner's
+        own comments, spam and already-replied ones, generate a short
+        Persian AI reply for the rest, and record every decision so no
+        comment is ever answered twice.
+        """
+        recent = await self.ig_content_manager.list_recent_media(amount=self._COMMENTS_MAX_POSTS)
+        status = recent.get("status", "")
+        if status in self.SECURITY_STOP_STATUSES:
+            await self._halt_on_security_error(task_id, recent.get("error", status))
+            return None
+        if status != "ok":
+            return f"خطا در خواندن پست‌های اخیر: {str(recent.get('error', status))[:80]}"
+
+        own_username = (
+            getattr(getattr(self.ig_content_manager, "ig_client", None), "active_username", None)
+            or ""
+        )
+        replied = 0
+        skipped = 0
+        errors: list[str] = []
+
+        for post in recent.get("posts", []):
+            if replied >= self._COMMENTS_MAX_REPLIES:
+                break
+            media_pk = str(post.get("pk", ""))
+            if not media_pk:
+                continue
+            fetched = await self.ig_comments.fetch_media_comments(media_pk, amount=10)
+            cstatus = fetched.get("status", "")
+            if cstatus in self.SECURITY_STOP_STATUSES:
+                await self._halt_on_security_error(task_id, fetched.get("error", cstatus))
+                return None
+            if cstatus != "ok":
+                errors.append(f"{media_pk}: {str(fetched.get('error', cstatus))[:40]}")
+                continue
+            for comment in fetched.get("comments", []):
+                if replied >= self._COMMENTS_MAX_REPLIES:
+                    break
+                comment_pk = str(comment.get("comment_pk", ""))
+                if not comment_pk:
+                    continue
+                event_key = f"cm:{media_pk}:{comment_pk}"
+                if await self._is_event_processed(event_key):
+                    skipped += 1
+                    continue
+                # Never reply to our own comments, to spam, or to a comment
+                # the reply tool already knows was answered.
+                if own_username and comment.get("username") == own_username:
+                    skipped += 1
+                    await self._mark_event_processed(event_key, task_id)
+                    continue
+                if comment.get("category") == "اسپم" or comment.get("already_replied"):
+                    skipped += 1
+                    await self._mark_event_processed(event_key, task_id)
+                    continue
+                prompt = (
+                    "یک نفر زیر یکی از پست‌های اینستاگرام من این کامنت را گذاشته است:\n"
+                    f"«{comment.get('text', '')}»\n"
+                    "یک پاسخ کوتاه، محترمانه و دقیق به فارسی بنویس."
+                )
+                ai_res = await self.agent.ai_client.chat_completion(
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                reply_text = ai_res.get("message", {}).get("content", "")
+                if not reply_text:
+                    continue
+                send_res = await self.ig_comments.reply_to_comment(media_pk, comment_pk, reply_text)
+                rstatus = send_res.get("status", "")
+                if rstatus in self.SECURITY_STOP_STATUSES:
+                    await self._halt_on_security_error(task_id, send_res.get("error", rstatus))
+                    return None
+                if rstatus == "موفق":
+                    replied += 1
+                    await self._mark_event_processed(event_key, task_id)
+                elif rstatus == "skipped_duplicate":
+                    skipped += 1
+                    await self._mark_event_processed(event_key, task_id)
+                else:
+                    errors.append(f"{comment_pk}: {str(send_res.get('error', rstatus))[:40]}")
+
+        if errors:
+            return f"خطا در پاسخ به {len(errors)} کامنت ({replied} پاسخ ارسال شد): {'; '.join(errors)[:100]}"
+        return f"موفق ({replied} پاسخ جدید به کامنت‌ها ارسال شد، {skipped} رد شد)"
+
+    async def _run_custom_agent_prompt(self, task_id: str, task: Dict[str, Any]) -> Optional[str]:
+        """Run the agent itself with the task's instruction, as if the owner
+        had sent that message. Whatever the agent does (search, download,
+        post, message) is reported back as the run status."""
+        instruction = (task.get("natural_instruction") or "").strip()
+        if not instruction:
+            return "خطا: دستور این تسک خالی است"
+        result = await self.agent.process_command(
+            user_id=settings.TELEGRAM_OWNER_ID,
+            user_message=instruction,
+            channel="telegram",
+        )
+        reply = (result.get("reply") or "").strip()
+        if not reply:
+            return "موفق (ایجنت کاری انجام داد ولی پاسخ متنی نداد)"
+        if reply.startswith("⚠️ خطا در ارتباط با سرویس هوش مصنوعی"):
+            return f"خطا: {reply[:120]}"
+        return f"موفق: {reply[:150]}"
 
     async def _update_task_run(self, task_id: str, now_iso: str, status_text: str) -> None:
         await self.db.execute(
